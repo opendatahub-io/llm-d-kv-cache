@@ -1,29 +1,19 @@
 # Project maintainers
 approvers:
-- vMaroon
-- dannyharnik
-- kfirtoledo
-- liu-cong
+- aneeshkp
+- acardace
+- dagrayvid
+- evacchi
+- Gregory-Pereira
+- RishabhSaini
+- zdtsw
+- wseaton
+- nainaz
+- anishasthana
 
 # Project reviewers
 reviewers:
-- vMaroon
-- dannyharnik
-- kfirtoledo
-- orozery
-- liran
-- nilig
-- michalmalka
-- yankay
-- liu-cong
-- hyeongyun0916
-- sagearc
-
-# Auto-assign configuration for global assignment
-# Works in addition to GitHub's built-in CODEOWNERS functionality
-# Implemented via a custom GitHub Action
-auto-assign:
-  - yankay
-  - liu-cong
-  - hyeongyun0916
-  - sagearc
+- acardace
+- evacchi
+- Gregory-Pereira
+- zdtsw
