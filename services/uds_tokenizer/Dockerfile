@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM --platform=$TARGETPLATFORM python:3.10-slim as builder
+FROM --platform=$TARGETPLATFORM python:3.12-slim as builder
 
 # Set build arguments
 ARG TARGETPLATFORM
@@ -26,7 +26,10 @@ COPY pyproject.toml /app/pyproject.toml
 RUN pip install --no-cache-dir .
 
 # Runtime stage
-FROM --platform=$TARGETPLATFORM python:3.10-slim
+FROM --platform=$TARGETPLATFORM python:3.12-slim
+
+# Set build arguments
+ARG HEALTH_PORT=8082
 
 # Set working directory
 WORKDIR /app
@@ -34,7 +37,7 @@ WORKDIR /app
 RUN apt-get update && apt-get upgrade -y && apt-get clean && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
 # Copy installed dependencies from build stage
-COPY --from=builder /usr/local/lib/python3.10/site-packages /usr/local/lib/python3.10/site-packages
+COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 # Copy executables from build stage
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
 
@@ -58,6 +61,9 @@ RUN mkdir -p /.cache && chown -R 65532:65532 /.cache
 
 # Switch to non-root user
 USER 65532:65532
+
+# Expose health check port (configurable via build arg)
+EXPOSE ${HEALTH_PORT}
 
 # Startup command: run direct gRPC server
 CMD ["python", "/app/run_grpc_server.py"]

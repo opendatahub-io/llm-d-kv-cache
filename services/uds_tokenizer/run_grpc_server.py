@@ -42,6 +42,9 @@ logging.basicConfig(
 UDS_SOCKET_PATH = "/tmp/tokenizer/tokenizer-uds.socket"
 # TCP probe port
 PROBE_PORT = int(os.getenv("PROBE_PORT", 8082))  # use 8082 for probing to avoid conflicts
+# TCP gRPC port (FOR TESTING ONLY - do not use in production)
+# If not set, only UDS is used (production default)
+GRPC_PORT = os.getenv("GRPC_PORT", "")  # e.g., "50051" for tests
 
 # Global variables for server control and configuration
 grpc_server = None
@@ -174,9 +177,9 @@ def run_server():
     os.makedirs(os.path.dirname(UDS_SOCKET_PATH), mode=0o700, exist_ok=True)
 
     thread_pool = get_thread_pool()
-    grpc_server = create_grpc_server(tokenizer_service, UDS_SOCKET_PATH, thread_pool)
+    grpc_server = create_grpc_server(tokenizer_service, UDS_SOCKET_PATH, thread_pool, GRPC_PORT)
     grpc_server.start()
-    logging.info(f"Synchronous gRPC server started on {UDS_SOCKET_PATH}")
+    logging.info(f"Synchronous gRPC server started on {UDS_SOCKET_PATH}" + (f" and TCP port {GRPC_PORT}" if GRPC_PORT else ""))
 
     # Start probe server in background
     start_probe_server_in_background()

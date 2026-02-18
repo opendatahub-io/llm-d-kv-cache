@@ -128,8 +128,15 @@ class TokenizationServiceServicer(tokenizer_pb2_grpc.TokenizationServiceServicer
             )
 
 
-def create_grpc_server(tokenizer_service: TokenizerService, uds_socket_path: str, thread_pool):
-    """Create a synchronous gRPC server"""
+def create_grpc_server(tokenizer_service: TokenizerService, uds_socket_path: str, thread_pool, tcp_port: str = ""):
+    """Create a synchronous gRPC server.
+    
+    Args:
+        tokenizer_service: The tokenizer service implementation
+        uds_socket_path: Path to Unix Domain Socket
+        thread_pool: ThreadPoolExecutor for handling requests
+        tcp_port: TCP port for testing only (leave empty for production)
+    """
     # Create synchronous gRPC server with optimized configuration for multi-threaded processing
     server = grpc.server(
         thread_pool,
@@ -167,9 +174,13 @@ def create_grpc_server(tokenizer_service: TokenizerService, uds_socket_path: str
     else:
         logging.info("gRPC reflection disabled (set `ENABLE_GRPC_REFLECTION=1` to enable)")
 
-    # Bind to UDS
+    # Bind to UDS (production)
     server.add_insecure_port(f"unix://{uds_socket_path}")
-
     logging.info(f"Synchronous gRPC server configured to listen on {uds_socket_path}")
+
+    # Optionally bind to TCP port (FOR TESTING ONLY)
+    if tcp_port:
+        server.add_insecure_port(f"0.0.0.0:{tcp_port}")
+        logging.warning(f"TCP mode enabled on port {tcp_port} - FOR TESTING ONLY, DO NOT USE IN PRODUCTION")
 
     return server

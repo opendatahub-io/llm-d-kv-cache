@@ -16,6 +16,7 @@ UNAME_S := $(shell uname -s)
 TOOLS_DIR := $(shell pwd)/hack/tools
 CONTAINER_TOOL := $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
 BUILDER := $(shell command -v buildah >/dev/null 2>&1 && echo buildah || echo $(CONTAINER_TOOL))
+UDS_TOKENIZER_IMAGE ?= llm-d-uds-tokenizer:e2e-test
 
 # go source files
 SRC = $(shell find . -type f -name '*.go')
@@ -199,26 +200,46 @@ export CGO_LDFLAGS=$(CGO_LDFLAGS_FINAL)
 export PYTHONPATH=$(shell pwd)/pkg/preprocessing/chat_completions/vllm_source:$(shell pwd)/pkg/preprocessing/chat_completions:$(VENV_DIR)/lib/python$(PYTHON_VERSION)/site-packages
 
 .PHONY: test
-test: unit-test e2e-test ## Run all tests (UDS-only + embedded)
+test: unit-test e2e-test ## Run all tests (unit + e2e with embedded + UDS tokenizer service)
 
 .PHONY: unit-test
 unit-test: unit-test-uds unit-test-embedded ## Run unit tests (UDS-only + embedded)
 
 .PHONY: unit-test-uds
-unit-test-uds: download-zmq ## Run unit tests without embedded tokenizers (no Python required)
+unit-test-uds: check-go download-zmq ## Run unit tests without embedded tokenizers (no Python required)
 	@printf "\033[33;1m==== Running unit tests (UDS-only, no embedded tokenizers) ====\033[0m\n"
 	@go test -v ./pkg/...
 
 .PHONY: unit-test-embedded
-unit-test-embedded: install-python-deps download-zmq ## Run unit tests with embedded tokenizers
+unit-test-embedded: check-go install-python-deps download-zmq ## Run unit tests with embedded tokenizers
 	@printf "\033[33;1m==== Running unit tests (with embedded tokenizers) ====\033[0m\n"
 	@go test -v -tags $(EMBEDDED_TAGS) ./pkg/...
 
 .PHONY: e2e-test
-e2e-test: download-local-llama3 install-python-deps download-zmq ## Run end-to-end tests (requires embedded tokenizers)
-	@printf "\033[33;1m==== Running e2e tests ====\033[0m\n"
+e2e-test: e2e-test-uds e2e-test-embedded ## Run all end-to-end tests (UDS tokenizer service + embedded tokenizers)
+
+.PHONY: e2e-test-embedded
+e2e-test-embedded: check-go download-local-llama3 install-python-deps download-zmq ## Run end-to-end tests (requires embedded tokenizers)
+	@printf "\033[33;1m==== Running end-to-end tests (with embedded tokenizers) ====\033[0m\n"
 	@go test -v -tags $(EMBEDDED_TAGS) ./tests/...
 
+.PHONY: image-build-uds
+image-build-uds: check-container-tool ## Build the UDS tokenizer container image
+	@printf "\033[33;1m==== Building UDS tokenizer image $(UDS_TOKENIZER_IMAGE) ====\033[0m\n"
+	$(CONTAINER_TOOL) build -t $(UDS_TOKENIZER_IMAGE) services/uds_tokenizer
+
+.PHONY: e2e-test-uds
+e2e-test-uds: check-go download-zmq image-build-uds ## Run UDS tokenizer e2e tests (requires Docker)
+	@printf "\033[33;1m==== Running end-to-end tests (UDS tokenizer service) ====\033[0m\n"
+	@DOCKER_HOST=$$($(CONTAINER_TOOL) context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null); \
+	if [ -z "$$DOCKER_HOST" ]; then \
+		echo "ERROR: DOCKER_HOST could not be determined. Ensure Docker or Podman is installed and a context is configured."; \
+		exit 1; \
+	fi; \
+	DOCKER_HOST=$$DOCKER_HOST \
+	TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock \
+	UDS_TOKENIZER_IMAGE=$(UDS_TOKENIZER_IMAGE) \
+	go test -v -count=1 -timeout 10m ./tests/e2e/uds_tokenizer/...
 ##@ UDS Tokenizer Python Tests
 
 UDS_TOKENIZER_DIR := services/uds_tokenizer
@@ -247,7 +268,7 @@ uds-tokenizer-service-test: uds-tokenizer-install-deps ## Run UDS tokenizer inte
 		-v --timeout=60
 
 .PHONY: bench
-bench: install-python-deps download-zmq ## Run benchmarks (requires embedded tokenizers)
+bench: check-go install-python-deps download-zmq ## Run benchmarks (requires embedded tokenizers)
 	@printf "\033[33;1m==== Running chat template benchmarks ====\033[0m\n"
 	@go test -bench=. -benchmem -tags $(EMBEDDED_TAGS) ./pkg/preprocessing/chat_completions/
 	@printf "\033[33;1m==== Running tokenization benchmarks ====\033[0m\n"

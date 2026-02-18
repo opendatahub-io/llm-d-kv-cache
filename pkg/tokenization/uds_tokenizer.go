@@ -29,9 +29,10 @@ import (
 )
 
 // UdsTokenizerConfig represents the configuration for the UDS-based tokenizer,
-// including the socket file path.
+// including the socket file path or TCP address (for testing only).
 type UdsTokenizerConfig struct {
-	SocketFile string `json:"socketFile"`
+	SocketFile string `json:"socketFile"` // UDS socket path (production) or host:port for TCP (testing only)
+	UseTCP     bool   `json:"useTCP"`     // If true, use TCP instead of UDS (for testing only, default: false)
 }
 
 func (cfg *UdsTokenizerConfig) IsEnabled() bool {
@@ -61,9 +62,19 @@ func NewUdsTokenizer(ctx context.Context, config *UdsTokenizerConfig, modelName 
 		socketFile = defaultSocketFile
 	}
 
-	// Create gRPC connection using UDS
+	// Determine address based on UseTCP flag
+	var address string
+	if config.UseTCP {
+		// TCP address (for testing only)
+		address = socketFile
+	} else {
+		// UDS socket path (production default)
+		address = fmt.Sprintf("unix://%s", socketFile)
+	}
+
+	// Create gRPC connection
 	conn, err := grpc.NewClient(
-		fmt.Sprintf("unix://%s", socketFile),
+		address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
 			Time:                10 * time.Second,
