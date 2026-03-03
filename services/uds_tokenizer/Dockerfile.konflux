@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Build stage use ubi image for konflux
+# Build stage
 FROM --platform=$TARGETPLATFORM registry.access.redhat.com/ubi9/python-312:9.7 as builder
 
 # Set build arguments
@@ -21,48 +21,54 @@ ARG TARGETPLATFORM
 # Set working directory
 WORKDIR /app
 
-# Copy dependencies and install them
+# Run as root for build stage
+USER root
+
+# use requirments.txt for konflux
 COPY requirements.txt /app/requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Runtime stage
 FROM --platform=$TARGETPLATFORM registry.access.redhat.com/ubi9/python-312:9.7
 
+# Set build arguments
+ARG HEALTH_PORT=8082
+
 # Set working directory
 WORKDIR /app
 
-# Need root user to do update
-USER root
-# microdnf does not exist in base image, only yum
-RUN yum update -y && yum clean all && rm -rf /var/cache/yum
-
-# Copy installed dependencies from build stage
+# Copy installed dependencies from build stage (UBI uses /opt/app-root/)
 COPY --from=builder /opt/app-root/lib/python3.12/site-packages /opt/app-root/lib/python3.12/site-packages
 # Copy executables from build stage
 COPY --from=builder /opt/app-root/bin/ /opt/app-root/bin/
 
-# Ensure PATH includes /opt/app-root/bin for 3.12
-ENV PATH="/opt/app-root/bin:${PATH}"
+# Need root for chown operations
+USER root
 
 # Copy project files into the image
 COPY run_grpc_server.py /app/
 COPY tokenizer_grpc_service.py /app/tokenizer_grpc_service.py
-COPY models/ /app/models/
+COPY tokenizers/ /app/tokenizers/
 COPY utils/ /app/utils/
 COPY tokenizer_service/ /app/tokenizer_service/
 COPY tokenizerpb/ /app/tokenizerpb/
 
-# Create directories and set permissions for non-root user 1001(ubi use this than 65532)
-# - /tmp/tokenizer: UDS socket directory
-# - /app/models: Model cache directory
-# - /.modelscope: ModelScope cache directory
-# - /.cache: Hugging Face cache directory
-RUN mkdir -p /tmp/tokenizer /app/models /.modelscope /.cache && \
-    chown -R 1001:0 /tmp/tokenizer /app/models /.modelscope /.cache && \
-    chmod -R g=u /tmp/tokenizer /app/models /.modelscope /.cache
+# Create directory for UDS socket
+RUN mkdir -p /tmp/tokenizer && chown 65532:65532 /tmp/tokenizer
 
-# Switch to non-root user (1001 is the default non-root user in UBI images)
-USER 1001
+# Create tokenizer cache directories and set permissions
+ENV TOKENIZERS_DIR=/app/tokenizers
+RUN mkdir -p /app/tokenizers && chown -R 65532:65532 /app/tokenizers
+# Create and set permissions for ModelScope directory
+RUN mkdir -p /.modelscope && chown -R 65532:65532 /.modelscope
+# Create and set permissions for Hugging Face cache directory
+RUN mkdir -p /.cache && chown -R 65532:65532 /.cache
+
+# Switch to non-root user
+USER 65532:65532
+
+# Expose health check port (configurable via build arg)
+EXPOSE ${HEALTH_PORT}
 
 # Startup command: run direct gRPC server
-CMD ["python3", "/app/run_grpc_server.py"]
+CMD ["python", "/app/run_grpc_server.py"]
