@@ -72,3 +72,12 @@ EXPOSE ${HEALTH_PORT}
 
 # Startup command: run direct gRPC server
 CMD ["python", "/app/run_grpc_server.py"]
+
+LABEL com.redhat.component="odh-llm-d-kv-cache-rhel9" \
+      name="odh-llm-d-kv-cache-rhel9" \
+      description="odh-llm-d-kv-cache" \
+      summary="odh-llm-d-kv-cache" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.k8s.display-name="odh-llm-d-kv-cache" \
+      io.k8s.description="odh-llm-d-kv-cache"
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
