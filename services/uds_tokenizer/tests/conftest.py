@@ -23,6 +23,7 @@ import pytest
 
 import tokenizerpb.tokenizer_pb2_grpc as tokenizer_pb2_grpc
 from tokenizer_service.tokenizer import TokenizerService
+from tokenizer_service.renderer import RendererService
 from tokenizer_grpc_service import create_grpc_server
 from utils.thread_pool_utils import get_thread_pool
 
@@ -49,14 +50,21 @@ def uds_socket_path() -> Iterator[str]:
 
 
 @pytest.fixture(scope="session")
-def tokenizer_service(uds_socket_path: str) -> Iterator[TokenizerService]:
-    """Provide the TokenizerService instance used by the gRPC server."""
-    service = TokenizerService()
+def grpc_server(uds_socket_path: str) -> Iterator[None]:
+    """Start and stop the gRPC server for the test session."""
+    tokenizer_service = TokenizerService()
+    renderer_service = RendererService()
+
     thread_pool = get_thread_pool()
-    server = create_grpc_server(service, uds_socket_path, thread_pool)
+    server = create_grpc_server(
+        tokenizer_service,
+        uds_socket_path,
+        thread_pool,
+        renderer_service=renderer_service,
+    )
     server.start()
 
-    yield service
+    yield
 
     # Graceful shutdown with matching timeout
     stop_future = server.stop(grace=5)
@@ -64,9 +72,7 @@ def tokenizer_service(uds_socket_path: str) -> Iterator[TokenizerService]:
 
 
 @pytest.fixture(scope="session")
-def grpc_channel(
-    tokenizer_service: TokenizerService, uds_socket_path: str
-) -> Iterator[grpc.Channel]:
+def grpc_channel(grpc_server: None, uds_socket_path: str) -> Iterator[grpc.Channel]:
     """Create a gRPC channel connected to the test server.
 
     Uses wait_for_ready to automatically retry connection until server is ready.
