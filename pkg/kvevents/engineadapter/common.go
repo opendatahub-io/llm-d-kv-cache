@@ -34,7 +34,6 @@ const (
 )
 
 // parseTopic extracts pod ID and model name from the topic format "kv@<pod-id>@<model-name>".
-// This format is shared by vLLM and SGLang.
 //
 //nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
 func parseTopic(topic string) (string, string) {
@@ -72,10 +71,10 @@ func getHashAsUint64(raw any) (uint64, error) {
 }
 
 // decodeEvent decodes a single msgpack event, extracts the tag, and dispatches to the appropriate converter.
+// Used by SGLang adapter. The vLLM adapter uses its own single-pass []any decoder.
 func decodeEvent(
 	rawEventBytes []byte,
 	converters map[string]func([]byte) (kvevents.GenericEvent, error),
-	engineName string,
 ) (kvevents.GenericEvent, error) {
 	var taggedUnion []any
 	if err := msgpack.Unmarshal(rawEventBytes, &taggedUnion); err != nil {
@@ -93,7 +92,7 @@ func decodeEvent(
 
 	converter, exists := converters[tag]
 	if !exists {
-		return nil, fmt.Errorf("unknown %s event tag: %s", engineName, tag)
+		return nil, fmt.Errorf("unknown event tag: %s", tag)
 	}
 
 	return converter(rawEventBytes)
