@@ -12,7 +12,9 @@ repos:
   hooks:
   - id: ruff-check
     args: [--output-format, github, --fix]
+    exclude: '_pb2(_grpc)?\.py$'
   - id: ruff-format
+    exclude: '_pb2(_grpc)?\.py$'
 - repo: https://github.com/crate-ci/typos
   rev: v1.38.1
   hooks:

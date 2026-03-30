@@ -14,10 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package engineadapter //nolint:testpackage // Tests access unexported functions parseVLLMTopic and decodeVLLMEvent
+package engineadapter //nolint:testpackage // Tests access unexported functions
 
 import (
-	"encoding/binary"
 	"testing"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
@@ -26,32 +25,17 @@ import (
 	"github.com/vmihailenco/msgpack/v5"
 )
 
-// TestParseVLLMTopic tests topic parsing.
-func TestParseVLLMTopic_Valid(t *testing.T) {
-	podID, modelName := parseVLLMTopic("kv@pod-123@llama-2-7b")
-	assert.Equal(t, "pod-123", podID)
-	assert.Equal(t, "llama-2-7b", modelName)
-}
-
-func TestParseVLLMTopic_NoModel(t *testing.T) {
-	podID, modelName := parseVLLMTopic("pod-123@llama-2-7b")
-	// Only 2 parts, falls through to default
-	assert.Equal(t, "pod-123@llama-2-7b", podID)
-	assert.Equal(t, "", modelName)
-}
-
-// TestShardingKey tests the sharding key extraction from raw messages.
-func TestShardingKey(t *testing.T) {
+// TestVLLMShardingKey tests the sharding key extraction from raw messages.
+func TestVLLMShardingKey(t *testing.T) {
 	adapter := NewVLLMAdapter()
 	assert.Equal(t, "pod-123", adapter.ShardingKey(&kvevents.RawMessage{Topic: "kv@pod-123@llama-2-7b"}))
 	assert.Equal(t, "fallback", adapter.ShardingKey(&kvevents.RawMessage{Topic: "fallback"}))
 }
 
-// TestParseMessage_Valid tests full message parsing through the adapter.
-func TestParseMessage_Valid(t *testing.T) {
+// TestVLLMParseMessage_Valid tests full message parsing through the adapter.
+func TestVLLMParseMessage_Valid(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
-	// Build a valid msgpack payload with a BlockStored event
 	blockStoredEvent := []any{
 		"BlockStored",
 		[]any{uint64(100), uint64(101)},
@@ -60,6 +44,7 @@ func TestParseMessage_Valid(t *testing.T) {
 		16,
 		nil,
 		"gpu",
+		nil,
 		nil,
 	}
 	blockStoredPayload, err := msgpack.Marshal(blockStoredEvent)
@@ -73,7 +58,7 @@ func TestParseMessage_Valid(t *testing.T) {
 	payload, err := msgpack.Marshal(batch)
 	require.NoError(t, err)
 
-	_ = blockStoredPayload // used indirectly via batch
+	_ = blockStoredPayload
 
 	msg := &kvevents.RawMessage{
 		Topic:    "kv@pod-1@llama-2-7b",
@@ -93,8 +78,8 @@ func TestParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
-// TestParseMessage_InvalidPayload tests error handling for invalid msgpack data.
-func TestParseMessage_InvalidPayload(t *testing.T) {
+// TestVLLMParseMessage_InvalidPayload tests error handling for invalid msgpack data.
+func TestVLLMParseMessage_InvalidPayload(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	msg := &kvevents.RawMessage{
@@ -106,8 +91,8 @@ func TestParseMessage_InvalidPayload(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// TestDecodeVLLMEvent_BlockStored tests decoding a valid BlockStored event without LoRA.
-func TestDecodeVLLMEvent_BlockStored(t *testing.T) {
+// TestVLLMBlockStored tests decoding a valid BlockStored event without LoRA.
+func TestVLLMBlockStored(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	vllmEvent := []any{
@@ -119,12 +104,13 @@ func TestDecodeVLLMEvent_BlockStored(t *testing.T) {
 		nil,
 		"gpu",
 		nil,
+		nil,
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -136,10 +122,11 @@ func TestDecodeVLLMEvent_BlockStored(t *testing.T) {
 	assert.Equal(t, "gpu", blockStored.DeviceTier)
 	assert.Nil(t, blockStored.LoraID)
 	assert.Nil(t, blockStored.LoraName)
+	assert.Nil(t, blockStored.ExtraKeys)
 }
 
-// TestDecodeVLLMEvent_BlockStoredWithLora tests decoding a valid BlockStored event.
-func TestDecodeVLLMEvent_BlockStoredWithLora(t *testing.T) {
+// TestVLLMBlockStoredWithLora tests decoding a valid BlockStored event with LoRA.
+func TestVLLMBlockStoredWithLora(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	vllmEvent := []any{
@@ -151,12 +138,13 @@ func TestDecodeVLLMEvent_BlockStoredWithLora(t *testing.T) {
 		42,
 		"gpu",
 		"test-lora",
+		[]any{[]any{"uuid-A", "salt"}, nil},
 	}
 
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -170,10 +158,12 @@ func TestDecodeVLLMEvent_BlockStoredWithLora(t *testing.T) {
 	assert.Equal(t, 42, *blockStored.LoraID)
 	require.NotNil(t, blockStored.LoraName)
 	assert.Equal(t, "test-lora", *blockStored.LoraName)
+	require.NotNil(t, blockStored.ExtraKeys)
+	assert.Equal(t, [][]any{{"uuid-A", "salt"}, nil}, blockStored.ExtraKeys)
 }
 
-// TestDecodeVLLMEvent_BlockStoredMissingLoraName tests decoding with missing field.
-func TestDecodeVLLMEvent_BlockStoredMissingLoraName(t *testing.T) {
+// TestVLLMBlockStoredMissingLoraName tests that vLLM adapter errors on missing fields.
+func TestVLLMBlockStoredMissingLoraName(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	vllmEvent := []any{
@@ -189,13 +179,37 @@ func TestDecodeVLLMEvent_BlockStoredMissingLoraName(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
 
-// TestDecodeVLLMEvent_BlockRemoved tests decoding a valid BlockRemoved event.
-func TestDecodeVLLMEvent_BlockRemoved(t *testing.T) {
+// TestVLLMBlockStoredInvalidExtraKeys tests invalid extra_keys type.
+func TestVLLMBlockStoredInvalidExtraKeys(t *testing.T) {
+	adapter := NewVLLMAdapter()
+
+	vllmEvent := []any{
+		"BlockStored",
+		[]any{uint64(100)},
+		uint64(99),
+		[]uint32{1, 2},
+		16,
+		nil,
+		"gpu",
+		nil,
+		[]any{"invalid_string"},
+	}
+
+	rawBytes, err := msgpack.Marshal(vllmEvent)
+	require.NoError(t, err)
+
+	_, err = decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "extra_keys[0] has invalid type")
+}
+
+// TestVLLMBlockRemoved tests decoding a valid BlockRemoved event.
+func TestVLLMBlockRemoved(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	medium := "cpu"
@@ -208,7 +222,7 @@ func TestDecodeVLLMEvent_BlockRemoved(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -218,8 +232,8 @@ func TestDecodeVLLMEvent_BlockRemoved(t *testing.T) {
 	assert.Equal(t, "cpu", blockRemoved.DeviceTier)
 }
 
-// TestDecodeVLLMEvent_AllBlocksCleared tests decoding a valid AllBlocksCleared event.
-func TestDecodeVLLMEvent_AllBlocksCleared(t *testing.T) {
+// TestVLLMAllBlocksCleared tests decoding a valid AllBlocksCleared event.
+func TestVLLMAllBlocksCleared(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	vllmEvent := []any{"AllBlocksCleared"}
@@ -227,7 +241,7 @@ func TestDecodeVLLMEvent_AllBlocksCleared(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	require.NoError(t, err)
 	require.NotNil(t, event)
 
@@ -235,8 +249,8 @@ func TestDecodeVLLMEvent_AllBlocksCleared(t *testing.T) {
 	require.True(t, ok, "expected AllBlocksClearedEvent")
 }
 
-// TestDecodeVLLMEvent_UnknownTag tests error handling for unknown event tags.
-func TestDecodeVLLMEvent_UnknownTag(t *testing.T) {
+// TestVLLMUnknownTag tests error handling for unknown event tags.
+func TestVLLMUnknownTag(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	vllmEvent := []any{"UnknownEventType", "some", "data"}
@@ -244,36 +258,36 @@ func TestDecodeVLLMEvent_UnknownTag(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	assert.Error(t, err)
 	assert.Nil(t, event)
 	assert.Contains(t, err.Error(), "unknown vLLM event tag")
 }
 
-// TestDecodeVLLMEvent_MalformedPayload tests error handling for malformed msgpack data.
-func TestDecodeVLLMEvent_MalformedPayload(t *testing.T) {
+// TestVLLMMalformedPayload tests error handling for malformed msgpack data.
+func TestVLLMMalformedPayload(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	rawBytes := []byte{0xFF, 0xFF, 0xFF}
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
 
-// TestDecodeVLLMEvent_EmptyPayload tests error handling for empty event bytes.
-func TestDecodeVLLMEvent_EmptyPayload(t *testing.T) {
+// TestVLLMEmptyPayload tests error handling for empty event bytes.
+func TestVLLMEmptyPayload(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	rawBytes := []byte{}
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	assert.Error(t, err)
 	assert.Nil(t, event)
 }
 
-// TestDecodeVLLMEvent_MissingTag tests error handling for events without a tag.
-func TestDecodeVLLMEvent_MissingTag(t *testing.T) {
+// TestVLLMMissingTag tests error handling for events without a tag.
+func TestVLLMMissingTag(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	vllmEvent := []any{}
@@ -281,15 +295,14 @@ func TestDecodeVLLMEvent_MissingTag(t *testing.T) {
 	rawBytes, err := msgpack.Marshal(vllmEvent)
 	require.NoError(t, err)
 
-	event, err := adapter.decodeVLLMEvent(rawBytes)
+	event, err := decodeEvent(rawBytes, adapter.eventConverters, "vLLM")
 	assert.Error(t, err)
 	assert.Nil(t, event)
 	assert.Contains(t, err.Error(), "malformed tagged union")
 }
 
-// TestDecodeEventBatch_NestedArrayEvents tests that the batch decoder correctly handles
-// events sent as nested msgpack arrays.
-func TestDecodeEventBatch_NestedArrayEvents(t *testing.T) {
+// TestVLLMEventBatch_NestedArrayEvents tests batch decoding with nested msgpack arrays.
+func TestVLLMEventBatch_NestedArrayEvents(t *testing.T) {
 	adapter := NewVLLMAdapter()
 
 	blockStoredEvent := []any{
@@ -300,6 +313,7 @@ func TestDecodeEventBatch_NestedArrayEvents(t *testing.T) {
 		16,
 		nil,
 		"gpu",
+		nil,
 		nil,
 	}
 
@@ -312,7 +326,6 @@ func TestDecodeEventBatch_NestedArrayEvents(t *testing.T) {
 	payload, err := msgpack.Marshal(batch)
 	require.NoError(t, err)
 
-	// Decode the batch via ParseMessage
 	msg := &kvevents.RawMessage{
 		Topic:    "kv@pod-1@model",
 		Sequence: 1,
@@ -329,39 +342,4 @@ func TestDecodeEventBatch_NestedArrayEvents(t *testing.T) {
 	assert.Equal(t, uint64(9), blockStored.ParentHash)
 	assert.Equal(t, []uint32{1, 2, 3}, blockStored.Tokens)
 	assert.Equal(t, "gpu", blockStored.DeviceTier)
-}
-
-// TestGetHashAsUint64 tests hash format conversions.
-func TestGetHashAsUint64(t *testing.T) {
-	adapter := NewVLLMAdapter()
-
-	t.Run("uint64", func(t *testing.T) {
-		result, err := adapter.getHashAsUint64(uint64(42))
-		require.NoError(t, err)
-		assert.Equal(t, uint64(42), result)
-	})
-
-	t.Run("int64", func(t *testing.T) {
-		result, err := adapter.getHashAsUint64(int64(42))
-		require.NoError(t, err)
-		assert.Equal(t, uint64(42), result)
-	})
-
-	t.Run("bytes_8", func(t *testing.T) {
-		b := make([]byte, 8)
-		binary.BigEndian.PutUint64(b, 12345)
-		result, err := adapter.getHashAsUint64(b)
-		require.NoError(t, err)
-		assert.Equal(t, uint64(12345), result)
-	})
-
-	t.Run("bytes_empty", func(t *testing.T) {
-		_, err := adapter.getHashAsUint64([]byte{})
-		assert.Error(t, err)
-	})
-
-	t.Run("unsupported_type", func(t *testing.T) {
-		_, err := adapter.getHashAsUint64("not a hash")
-		assert.Error(t, err)
-	})
 }

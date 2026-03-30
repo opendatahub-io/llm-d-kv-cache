@@ -39,11 +39,11 @@ type DummyTokenizer struct {
 }
 
 func (d *DummyTokenizer) RenderChat(renderReq *types.RenderChatRequest,
-) ([]uint32, []types.Offset, error) {
+) ([]uint32, *MultiModalFeatures, error) {
 	if d.returnError {
 		return nil, nil, fmt.Errorf("dummy tokenizer error")
 	}
-	return []uint32{1, 2, 3}, []types.Offset{{0, 1}, {2, 3}, {4, 5}}, nil
+	return []uint32{1, 2, 3}, nil, nil
 }
 
 func (d *DummyTokenizer) Render(prompt string) ([]uint32, []types.Offset, error) {
@@ -90,11 +90,11 @@ func TestCachedHFTokenizer_Render(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tokenIds, offsets, err := tokenizer.Render(tt.input)
+			tokens, offsets, err := tokenizer.Render(tt.input)
 
 			assert.NoError(t, err)
-			assert.GreaterOrEqual(t, len(tokenIds), 0)
-			assert.Equal(t, len(tokenIds), len(offsets))
+			assert.GreaterOrEqual(t, len(tokens), 0)
+			assert.Equal(t, len(tokens), len(offsets))
 		})
 	}
 }
@@ -115,15 +115,15 @@ func TestCachedHFTokenizer_CacheTokenizer(t *testing.T) {
 	input := "test input"
 
 	// First call - loads tokenizer
-	tokenIds1, offsets1, err1 := tokenizer.Render(input)
+	tokens1, offsets1, err1 := tokenizer.Render(input)
 	require.NoError(t, err1)
 
 	// Second call - should use cached tokenizer
-	tokenIds2, offsets2, err2 := tokenizer.Render(input)
+	tokens2, offsets2, err2 := tokenizer.Render(input)
 	require.NoError(t, err2)
 
 	// Results should be identical
-	assert.Equal(t, tokenIds1, tokenIds2)
+	assert.Equal(t, tokens1, tokens2)
 	assert.Equal(t, offsets1, offsets2)
 }
 
@@ -173,11 +173,11 @@ func TestCachedLocalTokenizer_Encode(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tokenIds, offsets, err := tokenizer.Render(tt.input)
+			tokens, offsets, err := tokenizer.Render(tt.input)
 
 			assert.NoError(t, err)
-			assert.GreaterOrEqual(t, len(tokenIds), 0)
-			assert.Equal(t, len(tokenIds), len(offsets))
+			assert.GreaterOrEqual(t, len(tokens), 0)
+			assert.Equal(t, len(tokens), len(offsets))
 		})
 	}
 }
@@ -226,10 +226,10 @@ func TestCompositeTokenizer_FallbackBehavior(t *testing.T) {
 		Tokenizers: []Tokenizer{dummyTokenizer, hfTokenizer},
 	}
 
-	tokenIds, offsets, err := composite.Render("hello world")
+	tokens, offsets, err := composite.Render("hello world")
 	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, len(tokenIds), 0)
-	assert.Equal(t, len(tokenIds), len(offsets))
+	assert.GreaterOrEqual(t, len(tokens), 0)
+	assert.Equal(t, len(tokens), len(offsets))
 }
 
 func TestParseHFCacheModelName(t *testing.T) {

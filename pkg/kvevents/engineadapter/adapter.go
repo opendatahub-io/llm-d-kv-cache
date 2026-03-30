@@ -15,7 +15,33 @@ limitations under the License.
 */
 
 // Package engineadapter provides engine-specific implementations of the
-// kvevents.EngineAdapter interface. Each inference engine (e.g. vLLM) has
-// its own adapter that knows how to parse raw transport messages into
+// kvevents.EngineAdapter interface. Each inference engine (e.g. vLLM, SGLang)
+// has its own adapter that knows how to parse raw transport messages into
 // domain events.
 package engineadapter
+
+import (
+	"fmt"
+
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
+)
+
+const (
+	// EngineTypeVLLM selects the vLLM adapter.
+	EngineTypeVLLM = "vllm"
+	// EngineTypeSGLang selects the SGLang adapter.
+	EngineTypeSGLang = "sglang"
+)
+
+// NewAdapter creates an EngineAdapter for the given engine type.
+// Supported types: "vllm" (default), "sglang".
+func NewAdapter(engineType string) (kvevents.EngineAdapter, error) {
+	switch engineType {
+	case EngineTypeVLLM, "":
+		return NewVLLMAdapter(), nil
+	case EngineTypeSGLang:
+		return NewSGLangAdapter(), nil
+	default:
+		return nil, fmt.Errorf("unsupported engine type: %q (supported: %q, %q)", engineType, EngineTypeVLLM, EngineTypeSGLang)
+	}
+}

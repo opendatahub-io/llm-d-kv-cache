@@ -32,7 +32,8 @@ const (
 
 // tokenizationResponse holds the result of a tokenization operation.
 type tokenizationResponse struct {
-	Tokens []uint32
+	Tokens   []uint32
+	Features *MultiModalFeatures
 }
 
 // Task represents a unit of work for tokenizing a prompt.
@@ -67,7 +68,7 @@ func (pool *Pool) EnqueueTokenization(prompt string) {
 }
 
 // Tokenize queues a task and blocks until the final result is available.
-func (pool *Pool) Tokenize(renderReq *types.RenderChatRequest, prompt string) []uint32 {
+func (pool *Pool) Tokenize(renderReq *types.RenderChatRequest, prompt string) ([]uint32, *MultiModalFeatures) {
 	resultCh := make(chan tokenizationResponse, 1)
 	pool.queue.Add(Task{
 		RenderReq: renderReq,
@@ -76,8 +77,7 @@ func (pool *Pool) Tokenize(renderReq *types.RenderChatRequest, prompt string) []
 	})
 
 	res := <-resultCh
-	tokens := res.Tokens
-	return tokens
+	return res.Tokens, res.Features
 }
 
 // Run launches worker goroutines that process tasks until the context is
@@ -131,6 +131,7 @@ func (pool *Pool) workerLoop(_ int) {
 // It sends exactly one response (success or error) if ResultCh is provided.
 func (pool *Pool) processTask(task Task) error {
 	var tokens []uint32
+	var features *MultiModalFeatures
 	var err error
 	if task.RenderReq == nil {
 		tokens, _, err = pool.tokenizer.Render(task.Prompt)
@@ -139,7 +140,7 @@ func (pool *Pool) processTask(task Task) error {
 			return err
 		}
 	} else {
-		tokens, _, err = pool.tokenizer.RenderChat(task.RenderReq)
+		tokens, features, err = pool.tokenizer.RenderChat(task.RenderReq)
 		if err != nil {
 			log.Log.Error(err, "failed to render tokens", "task", task.RenderReq)
 			return err
@@ -149,7 +150,8 @@ func (pool *Pool) processTask(task Task) error {
 	// On success, send the response if a channel is provided and close the channel.
 	if task.ResultCh != nil {
 		resp := tokenizationResponse{
-			Tokens: tokens,
+			Tokens:   tokens,
+			Features: features,
 		}
 		task.ResultCh <- resp
 		close(task.ResultCh)

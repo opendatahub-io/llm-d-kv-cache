@@ -23,7 +23,7 @@ WORKDIR /app
 
 # Copy project metadata and install dependencies
 COPY pyproject.toml /app/pyproject.toml
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir . --extra-index-url https://download.pytorch.org/whl/cpu
 
 # Runtime stage
 FROM --platform=$TARGETPLATFORM python:3.12-slim
@@ -59,6 +59,9 @@ RUN mkdir -p /app/tokenizers && chown -R 65532:65532 /app/tokenizers
 RUN mkdir -p /.modelscope && chown -R 65532:65532 /.modelscope
 # Create and set permissions for Hugging Face cache directory
 RUN mkdir -p /.cache && chown -R 65532:65532 /.cache
+
+# Create non-root user so getpwuid() works (required by torch/vllm)
+RUN useradd -u 65532 -m nonroot
 
 # Switch to non-root user
 USER 65532:65532

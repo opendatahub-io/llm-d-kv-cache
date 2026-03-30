@@ -87,7 +87,12 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create token processor: %w", err)
 	}
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, engineadapter.NewVLLMAdapter())
+	adapter, err := engineadapter.NewAdapter(poolConfig.EngineType)
+	if err != nil {
+		return fmt.Errorf("failed to create engine adapter: %w", err)
+	}
+
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, adapter)
 	pool.Start(ctx)
 
 	// Create subscriber manager

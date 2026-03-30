@@ -20,14 +20,14 @@ For simple setups, see the **Storage Cleanup** section.
 
 ## System Requirements
 
-- vLLM version 0.12.0 or above.
+- vLLM version 0.18.0. Previous versions are supported via their matching wheels in the [wheels](./wheels) folder or the corresponding llm-d-kv-cache release assets.
 
 ## Installation
 
 ### 1. Install from a pre-built wheel (Recommended)
 
 ```bash
-pip install https://raw.githubusercontent.com/llm-d/llm-d-kv-cache/main/kv_connectors/llmd_fs_backend/wheels/llmd_fs_connector-0.1.0-cp312-cp312-linux_x86_64.whl
+pip install https://raw.githubusercontent.com/llm-d/llm-d-kv-cache/main/kv_connectors/llmd_fs_backend/wheels/llmd_fs_connector-0.18.0-cp312-cp312-linux_x86_64.whl
 ```
 
 This installs:
@@ -35,6 +35,9 @@ This installs:
 * Python module `llmd_fs_backend`
 * CUDA extension `storage_offload.so`
 
+Each llm-d release is aligned with the appropriate `vLLM` and `llm-d-kv-cache` versions.
+You can download the matching wheel from the release assets and install it manually from:
+https://github.com/llm-d/llm-d-kv-cache/releases/latest
 ### 2. Build from source (compile yourself)
 
 Requires CUDA toolkit and system dependencies.
@@ -65,7 +68,7 @@ pip install -e .
 - `max_staging_memory_gb`: total staging memory limit
 
 ### Environment variables
-- `STORAGE_LOG_LEVEL`: set the C++ storage log level (`trace`, `debug`, `info`, `warn`, `error`). Default: `info`
+- `STORAGE_LOG_LEVEL`: set the log level for both C++ and Python (`trace`, `debug`, `info`, `warn`, `error`). Default: `info`
 - `STORAGE_CONNECTOR_DEBUG`: legacy flag — setting to `1` enables debug-level logging (equivalent to `STORAGE_LOG_LEVEL=debug`)
 - `USE_KERNEL_COPY_WRITE` : enable GPU-kernel-based writes using GPU SMs (default 0 - uses DMA copy).
 - `USE_KERNEL_COPY_READ`: enable GPU-kernel-based reads using GPU SMs (default 0 - uses DMA copy).
@@ -123,9 +126,23 @@ Then apply the full vLLM deployment (including the offloading connector with a f
 kubectl apply -f ./docs/deployment/vllm-storage.yaml
 ```
 
-## Storage Cleanup
+## Metrics
 
-TBD
+The fs backend populates vLLM's built-in offloading metrics. When Prometheus metrics are enabled in vLLM, the following metrics are automatically exported:
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `vllm:kv_offload_total_bytes` | Counter | Total bytes transferred, labeled by `transfer_type` |
+| `vllm:kv_offload_total_time` | Counter | Total time spent on transfers (seconds), labeled by `transfer_type` |
+| `vllm:kv_offload_size` | Histogram | Distribution of transfer sizes in bytes, labeled by `transfer_type` |
+
+The `transfer_type` label distinguishes transfer directions:
+- `GPU_to_SHARED_STORAGE` — GPU to storage (PUT)
+- `SHARED_STORAGE_to_GPU` — storage to GPU (GET)
+
+These metrics are also available through vLLM's internal StatLogger.
+
+For a complete monitoring setup (Prometheus, Grafana, port-forwarding, and benchmarking), see the [Monitoring Guide](./docs/monitoring.md).
 
 ## Troubleshooting
 

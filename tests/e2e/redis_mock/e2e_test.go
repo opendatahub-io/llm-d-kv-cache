@@ -179,10 +179,10 @@ func (s *KVCacheSuite) TestPrefixReduction() {
 	s.Len(pods, len(fakePodList), "expected pod scores length to match candidate pods")
 	s.T().Logf("Received pod scores: %+v", pods)
 
-	tokens, _, err = s.tokenizer.Render(shortPrompt)
+	shortTokens, _, err := s.tokenizer.Render(shortPrompt)
 	s.Require().NoError(err)
 
-	_, shortPromptRequestKeys := s.promptToEngineAndRequestKeys(tokens, defaultModelName)
+	_, shortPromptRequestKeys := s.promptToEngineAndRequestKeys(shortTokens, defaultModelName)
 	s.Equal(int(pods[s.Pod1IP]), len(shortPromptRequestKeys), "all short-prompt block keys should have been indexed")
 }
 
@@ -431,13 +431,13 @@ func (s *KVCacheSuite) TestCacheHitWithLocalTokenizer() {
 	fakePodList := []string{s.Pod1IP}
 
 	// Tokenize using local tokenizer
-	tokens, offsets, err := localTokenizer.Render(prompt)
+	localTokens, localOffsets, err := localTokenizer.Render(prompt)
 	s.Require().NoError(err)
-	s.Require().NotEmpty(tokens)
-	s.Require().Equal(len(tokens), len(offsets), "tokens and offsets should have same length")
-	s.T().Logf("Local tokenizer produced %d tokens for prompt", len(tokens))
+	s.Require().NotEmpty(localTokens)
+	s.Require().Equal(len(localTokens), len(localOffsets), "tokens and offsets should have same length")
+	s.T().Logf("Local tokenizer produced %d tokens for prompt", len(localTokens))
 
-	tokens, _, err = s.tokenizer.Render(prompt)
+	tokens, _, err := s.tokenizer.Render(prompt)
 	s.Require().NoError(err)
 
 	// Convert tokens to KV block keys
@@ -454,9 +454,10 @@ func (s *KVCacheSuite) TestCacheHitWithLocalTokenizer() {
 	s.T().Logf("GetPodScores returned score: %v", pods[s.Pod1IP])
 
 	// Also verify that tokenizing the same prompt again produces same block keys
-	tokens2, _, err := localTokenizer.Render(prompt)
+	localTokens2, _, err := localTokenizer.Render(prompt)
 	s.Require().NoError(err)
-	requestKeys2 := s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens2, modelName)
+	requestKeys2, err := s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, localTokens2, modelName, nil)
+	s.Require().NoError(err)
 	s.Require().Equal(requestKeys, requestKeys2, "same prompt should produce same block keys")
 
 	s.T().Logf("Local tokenizer E2E test completed successfully")
@@ -492,13 +493,13 @@ func (s *KVCacheSuite) TestHFCacheStructureDiscoveryE2E() {
 	fakePodList := []string{s.Pod1IP}
 
 	// Tokenize using the auto-discovered HF cache tokenizer
-	tokens, offsets, err := localTokenizer.Render(prompt)
+	localTokens, localOffsets, err := localTokenizer.Render(prompt)
 	s.Require().NoError(err)
-	s.Require().NotEmpty(tokens)
-	s.Require().Equal(len(tokens), len(offsets), "tokens and offsets should have same length")
-	s.T().Logf("HF cache auto-discovery produced %d tokens for model %q", len(tokens), modelName)
+	s.Require().NotEmpty(localTokens)
+	s.Require().Equal(len(localTokens), len(localOffsets), "tokens and offsets should have same length")
+	s.T().Logf("HF cache auto-discovery produced %d tokens for model %q", len(localTokens), modelName)
 
-	tokens, _, err = s.tokenizer.Render(prompt)
+	tokens, _, err := s.tokenizer.Render(prompt)
 	s.Require().NoError(err)
 
 	// Convert tokens to KV block keys using promptToEngineAndRequestKeys with local tokenizer
@@ -507,9 +508,10 @@ func (s *KVCacheSuite) TestHFCacheStructureDiscoveryE2E() {
 	s.addEntriesToIndex(engineKeys1, requestKeys, fakePodList)
 
 	// Verify retrieval
-	tokens2, _, err := localTokenizer.Render(prompt)
+	localTokens2, _, err := localTokenizer.Render(prompt)
 	s.Require().NoError(err)
-	requestKeys2 := s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens2, modelName)
+	requestKeys2, err := s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, localTokens2, modelName, nil)
+	s.Require().NoError(err)
 	s.Require().Equal(requestKeys, requestKeys2, "same prompt should produce same block keys")
 
 	s.T().Logf("HF cache structure discovery E2E test completed successfully")
@@ -564,14 +566,13 @@ func (s *KVCacheSuite) TestLocalTokenizerChatTemplateE2E() {
 			renderReq := &types.RenderChatRequest{
 				Conversation: convertToPreprocessingConversation(conversation),
 			}
-			tokens, offsets, err := localTokenizer.RenderChat(renderReq)
+			chatTokens, _, err := localTokenizer.RenderChat(renderReq)
 			s.Require().NoError(err, "RenderChat should succeed")
-			s.Require().NotEmpty(tokens, "Tokens should not be empty")
-			s.Require().Equal(len(tokens), len(offsets), "Tokens and offsets should have same length")
-			s.T().Logf("Local tokenizer produced %d tokens from rendered chat template", len(tokens))
+			s.Require().NotEmpty(chatTokens, "Tokens should not be empty")
+			s.T().Logf("Local tokenizer produced %d tokens from rendered chat template", len(chatTokens))
 
 			// Step 3: Convert tokens to KV block keys
-			engineKeys, requestKeys := s.promptToEngineAndRequestKeys(tokens, tc.modelName)
+			engineKeys, requestKeys := s.promptToEngineAndRequestKeys(chatTokens, tc.modelName)
 			s.T().Logf("Generated %d KV block keys from rendered conversation", len(requestKeys))
 
 			// Step 4: Add to index and verify retrieval (full KV-cache flow)
@@ -588,10 +589,11 @@ func (s *KVCacheSuite) TestLocalTokenizerChatTemplateE2E() {
 			renderReq2 := &types.RenderChatRequest{
 				Conversation: convertToPreprocessingConversation(conversation),
 			}
-			tokens2, _, err := localTokenizer.RenderChat(renderReq2)
+			chatTokens2, _, err := localTokenizer.RenderChat(renderReq2)
 			s.Require().NoError(err)
 
-			requestKeys2 := s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens2, tc.modelName)
+			requestKeys2, err := s.tokenProcessor.TokensToKVBlockKeys(kvblock.EmptyBlockHash, chatTokens2, tc.modelName, nil)
+			s.Require().NoError(err)
 			s.Require().Equal(requestKeys, requestKeys2, "Same conversation should produce same block keys")
 
 			s.T().Logf("Local tokenizer chat template E2E test completed successfully")
@@ -822,11 +824,11 @@ func (s *KVCacheSuite) TestLocalTokenizerChatTemplateErrorHandling() {
 	reqEmpty := &types.RenderChatRequest{
 		Conversation: convertToPreprocessingConversation(emptyConversation),
 	}
-	tokens, _, err := localTokenizer.RenderChat(reqEmpty)
+	emptyTokens, _, err := localTokenizer.RenderChat(reqEmpty)
 	// This might succeed with empty output or fail depending on template
 	// Either is acceptable behavior
 	if err == nil {
-		s.T().Logf("Empty conversation rendered as: %v", tokens)
+		s.T().Logf("Empty conversation rendered as: %v", emptyTokens)
 	} else {
 		s.T().Logf("Empty conversation returned error (acceptable): %v", err)
 	}
@@ -887,14 +889,13 @@ func (s *KVCacheSuite) TestLocalTokenizerChatTemplateLongConversation() {
 			reqLong := &types.RenderChatRequest{
 				Conversation: convertToPreprocessingConversation(longConversation),
 			}
-			tokens, offsets, err := localTokenizer.RenderChat(reqLong)
+			longTokens, _, err := localTokenizer.RenderChat(reqLong)
 			s.Require().NoError(err)
-			s.Require().NotEmpty(tokens)
-			s.Require().Equal(len(tokens), len(offsets))
-			s.T().Logf("Long conversation produced %d tokens", len(tokens))
+			s.Require().NotEmpty(longTokens)
+			s.T().Logf("Long conversation produced %d tokens", len(longTokens))
 
 			// Convert to block keys
-			engineKeys, requestKeys := s.promptToEngineAndRequestKeys(tokens, tc.modelName)
+			engineKeys, requestKeys := s.promptToEngineAndRequestKeys(longTokens, tc.modelName)
 			s.Require().NotEmpty(requestKeys)
 			s.T().Logf("Generated %d block keys from long conversation", len(requestKeys))
 

@@ -40,6 +40,9 @@ type Config struct {
 	TopicFilter string `json:"topicFilter"`
 	// Concurrency is the number of parallel workers to run.
 	Concurrency int `json:"concurrency"`
+	// EngineType selects the inference engine adapter ("vllm" or "sglang").
+	// Default: "vllm".
+	EngineType string `json:"engineType,omitempty"`
 	// DiscoverPods enables the Kubernetes pod reconciler for automatic
 	// per-pod subscriber management. When enabled, the reconciler watches
 	// Kubernetes pods and creates/removes ZMQ subscribers dynamically.
@@ -245,7 +248,23 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				parentRequestKey = key
 			}
 
-			requestKeys := p.tokenProcessor.TokensToKVBlockKeys(parentRequestKey, ev.Tokens, effectiveModelName)
+			var extraFeatures []*kvblock.BlockExtraFeatures
+			if ev.ExtraKeys != nil {
+				var err error
+				extraFeatures, err = kvblock.ParseRawExtraKeys(ev.ExtraKeys)
+				if err != nil {
+					debugLogger.Error(err, "Failed to parse extra keys",
+						"podIdentifier", podIdentifier)
+					continue
+				}
+			}
+
+			requestKeys, err := p.tokenProcessor.TokensToKVBlockKeys(parentRequestKey, ev.Tokens, effectiveModelName, extraFeatures)
+			if err != nil {
+				debugLogger.Error(err, "Failed to generate request keys",
+					"podIdentifier", podIdentifier, "effectiveModelName", effectiveModelName)
+				continue
+			}
 
 			// Only proceed if we have valid keys to add.
 			if len(engineKeys) > 0 {
@@ -269,7 +288,7 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			// Iterate over the hashes and evict each key.
 			for _, hash := range ev.BlockHashes {
 				engineKey := kvblock.BlockHash(hash)
-				if err := p.index.Evict(ctx, engineKey, podEntries); err != nil {
+				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
 					debugLogger.Error(err, "Failed to remove event from index",
 						"podIdentifier", podIdentifier, "event", ev)
 					continue // Continue processing other events even if one fails

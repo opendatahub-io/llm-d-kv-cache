@@ -9,8 +9,8 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/fxamacker/cbor/v2 v2.7.0
 	github.com/go-logr/logr v1.4.3
+	github.com/go-zeromq/zmq4 v0.17.0
 	github.com/hashicorp/golang-lru/v2 v2.0.7
-	github.com/pebbe/zmq4 v1.4.0
 	github.com/prometheus/client_golang v1.22.0
 	github.com/prometheus/client_model v0.6.1
 	github.com/redis/go-redis/v9 v9.7.3
@@ -62,6 +62,7 @@ require (
 	github.com/go-openapi/jsonpointer v0.21.0 // indirect
 	github.com/go-openapi/jsonreference v0.20.2 // indirect
 	github.com/go-openapi/swag v0.23.0 // indirect
+	github.com/go-zeromq/goczmq/v4 v4.2.2 // indirect
 	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/google/btree v1.1.3 // indirect
 	github.com/google/gnostic-models v0.6.9 // indirect

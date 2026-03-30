@@ -18,7 +18,7 @@ The service exposes gRPC methods over UDS and HTTP endpoints for health/config:
 
 1. `TokenizationService.Tokenize` - Tokenize text via gRPC (UDS only)
 2. `TokenizationService.RenderChatTemplate` - Apply chat template via gRPC (UDS only)
-3. `/health` - Health check endpoint (TCP port, for Kubernetes probes)
+3. `/healthz` - Health check endpoint (TCP port, for Kubernetes probes)
 4. `/config` - Get or update configuration (TCP port)
 
 ## Quick Start
@@ -40,7 +40,6 @@ Before using tokenization methods, initialize the tokenizer for a specific model
 | Variable | Description | Default |
 |---------|-------------|---------|
 | `LOG_LEVEL` | Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | INFO |
-| `THREAD_POOL_SIZE` | Number of worker threads for all CPU-intensive operations | 2 * CPU cores (limited by container resources, max 32) |
 | `PROBE_PORT` | Port for health check endpoint | 8082 |
 | `USE_MODELSCOPE` | Whether to download tokenizer files from ModelScope (true) or Hugging Face (false) | false |
 | `ENABLE_GRPC_REFLECTION` | Enable gRPC server reflection for service discovery | disabled |
@@ -111,7 +110,7 @@ Response:
 
 ## HTTP Endpoints
 
-### GET /health
+### GET /healthz
 Health check endpoint for Kubernetes probes.
 
 Response:

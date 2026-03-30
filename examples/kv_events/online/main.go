@@ -277,7 +277,13 @@ func setupEventsPool(ctx context.Context, kvBlockIndex kvblock.Index) *kvevents.
 		logger.Error(err, "Failed to create token processor")
 		return nil
 	}
-	pool := kvevents.NewPool(cfg, kvBlockIndex, tokenProcessor, engineadapter.NewVLLMAdapter())
+	adapter, err := engineadapter.NewAdapter(cfg.EngineType)
+	if err != nil {
+		logger.Error(err, "Failed to create engine adapter")
+		return nil
+	}
+
+	pool := kvevents.NewPool(cfg, kvBlockIndex, tokenProcessor, adapter)
 
 	return pool
 }

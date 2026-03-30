@@ -95,7 +95,7 @@ linters:
         - w http.ResponseWriter
         - r *http.Request
   exclusions:
-    generated: lax
+    generated: strict
     presets:
       - comments
       - common-false-positives
@@ -105,6 +105,8 @@ linters:
       - third_party$
       - builtin$
       - examples$
+      - \.pb\.go$
+      - _grpc\.pb\.go$
 issues:
   max-issues-per-linter: 0
   max-same-issues: 0
@@ -115,8 +117,10 @@ formatters:
     - gofumpt
     - goimports
   exclusions:
-    generated: lax
+    generated: strict
     paths:
       - third_party$
       - builtin$
       - examples$
+      - \.pb\.go$
+      - _grpc\.pb\.go$

@@ -53,10 +53,25 @@ message ChatTemplateRequest {
   string model_name = 9;                  // The name of the model to use for tokenization
 }
 
-// ChatMessage represents a single message in a conversation
+// ImageUrl represents the image_url content block field
+message ImageUrl {
+  string url = 1; // URL of the image (http/https or data URI)
+}
+
+// ContentPart represents a single part of a multimodal message content block
+message ContentPart {
+  string type = 1;                 // "text" or "image_url"
+  optional string text = 2;       // Text content (type == "text")
+  optional ImageUrl image_url = 3; // Image content (type == "image_url")
+}
+
+// ChatMessage represents a single message in a conversation.
+// Mirrors Content in pkg/tokenization/types: set content for plain text,
+// content_parts for multimodal (image_url blocks). Exactly one should be set.
 message ChatMessage {
-  string role = 1;    // Role of the message (e.g., "user", "assistant", "system")
-  string content = 2; // Content of the message
+  string role = 1;                        // Role of the message (e.g., "user", "assistant", "system")
+  optional string content = 2;           // Plain-text content (Content.Raw)
+  repeated ContentPart content_parts = 3; // Multimodal content blocks (Content.Structured)
 }
 
 // ToolDescription represents a description of a tool
@@ -110,14 +125,80 @@ message InitializeTokenizerResponse {
   string error_message = 2;   // Error message if initialization failed
 }
 
+// PlaceholderRange represents a range of placeholder tokens for a multimodal item
+message PlaceholderRange {
+  int32 offset = 1; // Start index of the placeholder tokens in the prompt
+  int32 length = 2; // Number of placeholder tokens
+}
+
+// StringList holds a list of strings (used as map values)
+message StringList {
+  repeated string values = 1;
+}
+
+// PlaceholderRangeList holds a list of PlaceholderRange (used as map values)
+message PlaceholderRangeList {
+  repeated PlaceholderRange ranges = 1;
+}
+
+// MultiModalFeatures contains multimodal metadata produced by the render step
+message MultiModalFeatures {
+  map<string, StringList> mm_hashes = 1;                  // Per-modality item hashes
+  map<string, PlaceholderRangeList> mm_placeholders = 2;  // Per-modality placeholder ranges
+}
+
+// RenderChatCompletionRequest contains the fields from an OpenAI chat completion
+// request that are relevant to rendering (chat template application + tokenization).
+message RenderChatCompletionRequest {
+  string model_name = 1;                       // Model name to use for renderer selection
+  repeated ChatMessage messages = 2;           // Conversation messages
+  optional string tools_json = 3;              // Tools available to the model, as a JSON array
+  string chat_template = 4;                    // Override chat template (optional)
+  optional bool add_generation_prompt = 5;     // Whether to append the generation prompt (default: true)
+  bool continue_final_message = 6;             // Whether to continue the final message
+  optional string chat_template_kwargs = 7; // Additional chat template arguments as JSON
+}
+
+// RenderChatCompletionResponse contains the rendered output from OpenAIServingRender
+message RenderChatCompletionResponse {
+  string request_id = 1;            // Request ID from the render response
+  repeated uint32 token_ids = 2;    // Token IDs for the rendered input
+  MultiModalFeatures features = 3;  // Multimodal features (populated for MM inputs)
+  bool success = 4;                 // Whether the request was successful
+  string error_message = 5;         // Error message if the request failed
+}
+
+// RenderCompletionRequest contains the fields from an OpenAI completion request
+// that are relevant to rendering (validation + tokenization).
+message RenderCompletionRequest {
+  string model_name = 1; // Model name to use for renderer selection
+  string prompt = 2;     // Text prompt to render
+}
+
+// RenderCompletionResponse contains the rendered output for a completion request.
+message RenderCompletionResponse {
+  string request_id = 1;         // Request ID from the render response
+  repeated uint32 token_ids = 2; // Token IDs for the rendered prompt
+  bool success = 3;              // Whether the request was successful
+  string error_message = 4;      // Error message if the request failed
+}
+
 // TokenizationService defines the gRPC service for tokenization
 service TokenizationService {
   // Tokenize converts a text input to token IDs
   rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
 
-  // RenderChatTemplate renders a chat template with the given messages
+  // Deprecated: use RenderChatCompletion instead.
   rpc RenderChatTemplate(ChatTemplateRequest) returns (ChatTemplateResponse);
 
   // InitializeTokenizer initializes the tokenizer for a specific model
   rpc InitializeTokenizer(InitializeTokenizerRequest) returns (InitializeTokenizerResponse);
+
+  // RenderChatCompletion renders an OpenAI chat completion request via OpenAIServingRender,
+  // returning token IDs and multimodal features as a GenerateRequest-compatible response
+  rpc RenderChatCompletion(RenderChatCompletionRequest) returns (RenderChatCompletionResponse);
+
+  // RenderCompletion renders an OpenAI completion request via OpenAIServingRender,
+  // returning the rendered output for the given prompt
+  rpc RenderCompletion(RenderCompletionRequest) returns (RenderCompletionResponse);
 }

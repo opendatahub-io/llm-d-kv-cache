@@ -17,20 +17,11 @@ limitations under the License.
 package engineadapter
 
 import (
-	"encoding/binary"
 	"fmt"
-	"strings"
 
 	"github.com/vmihailenco/msgpack/v5"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
-)
-
-const (
-	// vLLM event type tags.
-	eventTagBlockStored      = "BlockStored"
-	eventTagBlockRemoved     = "BlockRemoved"
-	eventTagAllBlocksCleared = "AllBlocksCleared"
 )
 
 // VLLMAdapter implements the kvevents.EngineAdapter interface for vLLM engines.
@@ -55,7 +46,7 @@ func NewVLLMAdapter() *VLLMAdapter {
 // ShardingKey extracts the pod-id segment from a vLLM raw message topic.
 // Expected topic format: "kv@<pod-id>@<model-name>".
 func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
-	podID, _ := parseVLLMTopic(msg.Topic)
+	podID, _ := parseTopic(msg.Topic)
 	return podID
 }
 
@@ -65,19 +56,16 @@ func (v *VLLMAdapter) ShardingKey(msg *kvevents.RawMessage) string {
 //
 //nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
 func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kvevents.EventBatch, error) {
-	// Extract pod ID and model name from topic
-	podID, modelName := parseVLLMTopic(msg.Topic)
+	podID, modelName := parseTopic(msg.Topic)
 
-	// Decode the payload into vLLM event batch using msgpack
 	var vllmBatch msgpackVLLMEventBatch
 	if err := msgpack.Unmarshal(msg.Payload, &vllmBatch); err != nil {
 		return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event batch: %w", err)
 	}
 
-	// Convert vLLM events to generic events
 	genericEvents := make([]kvevents.GenericEvent, len(vllmBatch.Events))
 	for i, rawEventBytes := range vllmBatch.Events {
-		genericEvent, err := v.decodeVLLMEvent(rawEventBytes)
+		genericEvent, err := decodeEvent(rawEventBytes, v.eventConverters, "vLLM")
 		if err != nil {
 			return "", "", kvevents.EventBatch{}, fmt.Errorf("failed to decode vLLM event: %w", err)
 		}
@@ -90,32 +78,6 @@ func (v *VLLMAdapter) ParseMessage(msg *kvevents.RawMessage) (string, string, kv
 	}
 
 	return podID, modelName, batch, nil
-}
-
-// getHashAsUint64 converts vLLM hash formats (uint64 or []byte) to uint64.
-// This handles both legacy uint64 hashes and new []byte hashes by taking
-// the last 8 bytes and interpreting them as a big-endian integer.
-func (v *VLLMAdapter) getHashAsUint64(raw any) (uint64, error) {
-	switch val := raw.(type) {
-	case uint64:
-		return val, nil
-	case int64:
-		// msgpack can decode small integers as int64
-		//nolint:gosec // int64 to uint64 conversion is safe here
-		return uint64(val), nil
-	case []byte:
-		if len(val) == 0 {
-			return 0, fmt.Errorf("hash byte slice is empty")
-		}
-		if len(val) >= 8 {
-			return binary.BigEndian.Uint64(val[len(val)-8:]), nil
-		}
-		padded := make([]byte, 8)
-		copy(padded[8-len(val):], val)
-		return binary.BigEndian.Uint64(padded), nil
-	default:
-		return 0, fmt.Errorf("unsupported hash type: %T", val)
-	}
 }
 
 // vLLM msgpack-specific event structures.
@@ -137,6 +99,7 @@ type msgpackVLLMBlockStoredEvent struct {
 	LoraID          *int    `msgpack:",omitempty"`
 	Medium          *string `msgpack:",omitempty"`
 	LoraName        *string `msgpack:",omitempty"`
+	ExtraKeys       []any   `msgpack:",omitempty"`
 }
 
 type msgpackVLLMBlockRemovedEvent struct {
@@ -148,43 +111,6 @@ type msgpackVLLMBlockRemovedEvent struct {
 
 type msgpackVLLMAllBlocksClearedEvent struct {
 	_ struct{} `msgpack:",array"`
-}
-
-// parseVLLMTopic extracts pod ID and model name from vLLM topic format.
-// Expected format: "kv@<pod-id>@<model-name>".
-//
-//nolint:gocritic // unnamedResult: named returns conflict with nonamedreturns linter
-func parseVLLMTopic(topic string) (string, string) {
-	topicParts := strings.Split(topic, "@")
-	if len(topicParts) == 3 {
-		return topicParts[1], topicParts[2]
-	}
-	return topic, ""
-}
-
-// decodeVLLMEvent decodes a single vLLM event using msgpack and converts it to a generic event.
-func (v *VLLMAdapter) decodeVLLMEvent(rawEventBytes []byte) (kvevents.GenericEvent, error) {
-	// First decode to extract just the tag
-	var taggedUnion []any
-	if err := msgpack.Unmarshal(rawEventBytes, &taggedUnion); err != nil {
-		return nil, fmt.Errorf("failed to decode tagged union: %w", err)
-	}
-
-	if len(taggedUnion) < 1 {
-		return nil, fmt.Errorf("malformed tagged union: no tag")
-	}
-
-	tag, ok := taggedUnion[0].(string)
-	if !ok {
-		return nil, fmt.Errorf("event tag is not a string: %T", taggedUnion[0])
-	}
-
-	converter, exists := v.eventConverters[tag]
-	if !exists {
-		return nil, fmt.Errorf("unknown vLLM event tag: %s", tag)
-	}
-
-	return converter(rawEventBytes)
 }
 
 // convertBlockStoredEvent decodes and converts a msgpack vLLM BlockStored event to a generic event.
@@ -199,22 +125,23 @@ func (v *VLLMAdapter) convertBlockStoredEvent(rawEventBytes []byte) (kvevents.Ge
 		deviceTier = *vllmEvent.Medium
 	}
 
-	blockHashes := make([]uint64, 0, len(vllmEvent.BlockHashes))
-	for _, rawHash := range vllmEvent.BlockHashes {
-		hash, err := v.getHashAsUint64(rawHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse block hash: %w", err)
-		}
-		blockHashes = append(blockHashes, hash)
+	blockHashes, err := convertBlockHashes(vllmEvent.BlockHashes)
+	if err != nil {
+		return nil, err
 	}
 
 	var parentHash uint64
 	if vllmEvent.ParentBlockHash != nil {
-		hash, err := v.getHashAsUint64(vllmEvent.ParentBlockHash)
+		hash, err := getHashAsUint64(vllmEvent.ParentBlockHash)
 		if err != nil {
 			return nil, fmt.Errorf("failed to parse parent hash: %w", err)
 		}
 		parentHash = hash
+	}
+
+	extraKeys, err := convertExtraKeys(vllmEvent.ExtraKeys)
+	if err != nil {
+		return nil, err
 	}
 
 	return &kvevents.BlockStoredEvent{
@@ -224,6 +151,7 @@ func (v *VLLMAdapter) convertBlockStoredEvent(rawEventBytes []byte) (kvevents.Ge
 		DeviceTier:  deviceTier,
 		LoraID:      vllmEvent.LoraID,
 		LoraName:    vllmEvent.LoraName,
+		ExtraKeys:   extraKeys,
 	}, nil
 }
 
@@ -239,13 +167,9 @@ func (v *VLLMAdapter) convertBlockRemovedEvent(rawEventBytes []byte) (kvevents.G
 		deviceTier = *vllmEvent.Medium
 	}
 
-	blockHashes := make([]uint64, 0, len(vllmEvent.BlockHashes))
-	for _, rawHash := range vllmEvent.BlockHashes {
-		hash, err := v.getHashAsUint64(rawHash)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse block hash: %w", err)
-		}
-		blockHashes = append(blockHashes, hash)
+	blockHashes, err := convertBlockHashes(vllmEvent.BlockHashes)
+	if err != nil {
+		return nil, err
 	}
 
 	return &kvevents.BlockRemovedEvent{
