@@ -18,6 +18,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents/engineadapter"
 )
 
 func main() {
@@ -83,10 +85,14 @@ func run(ctx context.Context) error {
 	poolConfig := kvevents.DefaultConfig()
 	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(kvblock.DefaultTokenProcessorConfig())
 	if err != nil {
-		logger.Error(err, "failed to create token processor")
-		return err
+		return fmt.Errorf("failed to create token processor: %w", err)
 	}
-	pool := kvevents.NewPool(poolConfig, index, tokenProcessor)
+	adapter, err := engineadapter.NewAdapter(poolConfig.EngineType)
+	if err != nil {
+		return fmt.Errorf("failed to create engine adapter: %w", err)
+	}
+
+	pool := kvevents.NewPool(poolConfig, index, tokenProcessor, adapter)
 	pool.Start(ctx)
 
 	// Create subscriber manager

@@ -1,5 +1,3 @@
-//go:build embedded_tokenizers
-
 /*
 Copyright 2025 The llm-d Authors.
 
@@ -24,6 +22,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/llm-d/llm-d-kv-cache/examples/helper"
 	"github.com/llm-d/llm-d-kv-cache/examples/testdata"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
@@ -35,7 +34,6 @@ import (
 const (
 	envValkeyAddr       = "VALKEY_ADDR"
 	envValkeyEnableRDMA = "VALKEY_ENABLE_RDMA"
-	envHFToken          = "HF_TOKEN"
 )
 
 func main() {
@@ -89,6 +87,8 @@ func createValkeyConfig() (*kvcache.Config, error) {
 
 	config.TokenizersPoolConfig.ModelName = testdata.ModelName
 
+	helper.ApplyTokenizerEndpoint(config)
+
 	// Configure Valkey backend
 	valkeyAddr := os.Getenv(envValkeyAddr)
 	if valkeyAddr == "" {
@@ -111,12 +111,6 @@ func createValkeyConfig() (*kvcache.Config, error) {
 		MetricsLoggingInterval: 30 * time.Second,
 	}
 
-	// Configure tokenizer
-	if hfToken := os.Getenv(envHFToken); hfToken != "" {
-		config.TokenizersPoolConfig.HFTokenizerConfig.HuggingFaceToken = hfToken
-	}
-
-	config.TokenizersPoolConfig.ModelName = testdata.ModelName
 	return config, nil
 }
 
@@ -188,7 +182,7 @@ func demonstrateValkeyOperations(ctx context.Context, indexer *kvcache.Indexer) 
 
 	// Demonstrate eviction
 	logger.Info("Demonstrating cache eviction")
-	err = indexer.KVBlockIndex().Evict(ctx, promptKeys[0], podEntries[:1])
+	err = indexer.KVBlockIndex().Evict(ctx, promptKeys[0], kvblock.EngineKey, podEntries[:1])
 	if err != nil {
 		return fmt.Errorf("failed to evict cache entry: %w", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -103,21 +104,27 @@ func (m *CostAwareMemoryIndex) MaxCost() int64 {
 // CostPodCache wraps a sync.Map of PodEntry and provides cost calculation for memory usage estimation.
 type CostPodCache struct {
 	cache sync.Map // map[PodEntry]struct{}
+	// size tracks the number of entries in cache for O(1) Len().
+	size atomic.Int64
 }
 
 // Add adds a PodEntry to the cache.
 func (c *CostPodCache) Add(entry PodEntry) {
-	c.cache.Store(entry, struct{}{})
+	if _, loaded := c.cache.LoadOrStore(entry, struct{}{}); !loaded {
+		c.size.Add(1)
+	}
+}
+
+// Delete removes a PodEntry from the cache.
+func (c *CostPodCache) Delete(entry PodEntry) {
+	if _, loaded := c.cache.LoadAndDelete(entry); loaded {
+		c.size.Add(-1)
+	}
 }
 
 // Len returns the number of entries in the cache.
 func (c *CostPodCache) Len() int {
-	count := 0
-	c.cache.Range(func(key, value interface{}) bool {
-		count++
-		return true
-	})
-	return count
+	return int(c.size.Load())
 }
 
 // CalculateByteSize estimates memory usage for ristretto cost calculation.
@@ -159,24 +166,26 @@ func (c *CostPodCache) CalculateByteSize(keyStr string) int64 {
 var _ Index = &CostAwareMemoryIndex{}
 
 // Add adds a set of keys and their associated pod entries to the index backend.
+// If engineKeys is nil, only requestKey -> PodEntry mappings are created (no engineKey -> requestKey mapping).
+// This is used for speculative entries where engine keys are not yet known.
 func (m *CostAwareMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHash, entries []PodEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if len(engineKeys) == 0 || len(requestKeys) == 0 || len(entries) == 0 {
+	if len(requestKeys) == 0 || len(entries) == 0 {
 		return fmt.Errorf("no keys or entries provided for adding to index")
 	}
-	if len(engineKeys) != len(requestKeys) {
+	if engineKeys != nil && len(engineKeys) != len(requestKeys) {
 		return fmt.Errorf("mismatch between engine keys and request keys length")
 	}
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Add")
 
 	for i, requestKey := range requestKeys {
-		engineKey := engineKeys[i]
-
-		// Store engineKey -> requestKey mapping
-		m.requestKeys.Add(engineKey, requestKey)
+		// Store engineKey -> requestKey mapping (only if engineKeys provided)
+		if engineKeys != nil {
+			m.requestKeys.Add(engineKeys[i], requestKey)
+		}
 
 		keyStr := requestKey.String()
 		podCache, found := m.data.Get(keyStr)
@@ -185,13 +194,13 @@ func (m *CostAwareMemoryIndex) Add(ctx context.Context, engineKeys, requestKeys 
 		}
 
 		for _, entry := range entries {
-			podCache.cache.Store(entry, struct{}{})
+			podCache.Add(entry)
 		}
 
 		// Calculate the actual cost for this cache entry
 		cost := podCache.CalculateByteSize(keyStr)
 		m.data.Set(keyStr, podCache, cost)
-		traceLogger.Info("added pods to key", "requestKey", requestKey, "engineKey", engineKey, "pods", entries, "cost-bytes", cost)
+		traceLogger.Info("added pods to key", "requestKey", requestKey, "pods", entries, "cost-bytes", cost)
 	}
 	m.data.Wait()
 	return nil
@@ -253,7 +262,9 @@ func (m *CostAwareMemoryIndex) Lookup(ctx context.Context, requestKeys []BlockHa
 }
 
 // Evict removes a key and its associated pod entries from the index backend.
-func (m *CostAwareMemoryIndex) Evict(ctx context.Context, engineKey BlockHash, entries []PodEntry) error {
+// keyType indicates whether the key is an EngineKey (requires engine→request lookup)
+// or a RequestKey (used directly for speculative entries without engineKey mapping).
+func (m *CostAwareMemoryIndex) Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -263,34 +274,51 @@ func (m *CostAwareMemoryIndex) Evict(ctx context.Context, engineKey BlockHash, e
 
 	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("kvblock.CostAwareMemoryIndex.Evict")
 
-	requestKey, found := m.requestKeys.Get(engineKey)
-	if !found {
-		traceLogger.Info("engineKey not found in index, nothing to evict", "engineKey", engineKey)
-		return nil
+	var requestKey BlockHash
+	hasEngineKeyMapping := false
+
+	switch keyType {
+	case EngineKey:
+		rk, found := m.requestKeys.Get(key)
+		if !found {
+			traceLogger.Info("engineKey not found in mapping, nothing to evict", "engineKey", key)
+			return nil
+		}
+		requestKey = rk
+		hasEngineKeyMapping = true
+	case RequestKey:
+		requestKey = key
+	default:
+		return fmt.Errorf("unknown key type: %d", keyType)
 	}
 
 	keyStr := requestKey.String()
 	podCache, found := m.data.Get(keyStr)
 	if !found || podCache == nil {
-		traceLogger.Info("requestKey not found in index, cleaning up engineKey", "requestKey", requestKey, "engineKey", engineKey)
-		m.requestKeys.Remove(engineKey)
+		if hasEngineKeyMapping {
+			traceLogger.Info("requestKey not found in index, cleaning up engineKey", "requestKey", requestKey, "engineKey", key)
+			m.requestKeys.Remove(key)
+		} else {
+			traceLogger.Info("key not found in index, nothing to evict", "key", key)
+		}
 		return nil
 	}
 
 	podCacheLenBefore := podCache.Len()
 
 	for _, entry := range entries {
-		podCache.cache.Delete(entry)
+		podCache.Delete(entry)
 	}
 
 	if podCache.Len() == 0 {
 		m.data.Del(keyStr)
-		m.requestKeys.Remove(engineKey)
-
-		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey, "engineKey", engineKey)
+		if hasEngineKeyMapping {
+			m.requestKeys.Remove(key)
+		}
+		traceLogger.Info("removed requestKey from index as no pods remain", "requestKey", requestKey, "key", key)
 	} else if podCacheLenBefore != podCache.Len() {
 		m.data.Set(keyStr, podCache, podCache.CalculateByteSize(keyStr))
-		traceLogger.Info("evicted pods from engineKey", "requestKey", requestKey, "engineKey", engineKey, "pods", entries)
+		traceLogger.Info("evicted pods from key", "requestKey", requestKey, "key", key, "keyType", keyType, "pods", entries)
 	}
 	m.data.Wait()
 	return nil

@@ -16,12 +16,75 @@ limitations under the License.
 
 package types
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+)
+
+// ImageBlock represents the image_url field in a multimodal content block.
+type ImageBlock struct {
+	URL string `json:"url,omitempty"`
+}
+
+// ContentBlock represents a single part of a multimodal message.
+type ContentBlock struct {
+	Type     string     `json:"type"`
+	Text     string     `json:"text,omitempty"`
+	ImageURL ImageBlock `json:"image_url,omitempty"`
+}
+
+// Content holds a message's content — either plain text or a list of multimodal blocks.
+type Content struct {
+	Raw        string
+	Structured []ContentBlock
+}
+
+// UnmarshalJSON handles both the plain-string and block-list formats.
+func (c *Content) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		c.Raw = s
+		return nil
+	}
+	var blocks []ContentBlock
+	if err := json.Unmarshal(data, &blocks); err == nil {
+		c.Structured = blocks
+		return nil
+	}
+	return errors.New("content must be a string or array of content blocks")
+}
+
+// MarshalJSON serialises back to the original format.
+func (c Content) MarshalJSON() ([]byte, error) {
+	if c.Raw != "" {
+		return json.Marshal(c.Raw)
+	}
+	if len(c.Structured) > 0 {
+		return json.Marshal(c.Structured)
+	}
+	return json.Marshal("")
+}
+
+// PlainText returns the plain text content, concatenating text blocks for multimodal messages.
+func (c Content) PlainText() string {
+	if c.Raw != "" {
+		return c.Raw
+	}
+	var sb strings.Builder
+	for _, block := range c.Structured {
+		if block.Type == "text" {
+			sb.WriteString(block.Text)
+			sb.WriteString(" ")
+		}
+	}
+	return sb.String()
+}
 
 // Conversation represents a single message in a conversation.
 type Conversation struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role    string  `json:"role"`
+	Content Content `json:"content"`
 }
 
 // RenderChatRequest represents the request to render a chat template.

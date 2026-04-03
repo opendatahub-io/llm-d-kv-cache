@@ -1,5 +1,3 @@
-//go:build embedded_tokenizers
-
 // Copyright 2025 The llm-d Authors.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,17 +16,39 @@ package helper
 
 import (
 	"context"
+	"net"
 	"os"
 
 	"github.com/llm-d/llm-d-kv-cache/examples/testdata"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 )
 
 const (
-	envHFToken = "HF_TOKEN"
+	// EnvTokenizerEndpoint is the env var for the UDS tokenizer socket path or TCP address.
+	// Use a path (e.g. /tmp/tokenizer/tokenizer-uds.socket) for UDS mode,
+	// or host:port (e.g. localhost:50051) for TCP mode.
+	EnvTokenizerEndpoint = "TOKENIZER_ENDPOINT" //nolint:gosec // env var name, not a credential
 )
+
+func isTCPAddr(s string) bool {
+	host, port, err := net.SplitHostPort(s)
+	return err == nil && host != "" && port != ""
+}
+
+// ApplyTokenizerEndpoint reads TOKENIZER_ENDPOINT and sets UDS config on the given config.
+func ApplyTokenizerEndpoint(config *kvcache.Config) {
+	endpoint := os.Getenv(EnvTokenizerEndpoint)
+	if endpoint == "" {
+		return
+	}
+	config.TokenizersPoolConfig.UdsTokenizerConfig = &tokenization.UdsTokenizerConfig{
+		SocketFile: endpoint,
+		UseTCP:     isTCPAddr(endpoint),
+	}
+}
 
 func getKVCacheIndexerConfig() (*kvcache.Config, error) {
 	config, err := kvcache.NewDefaultConfig()
@@ -37,13 +57,8 @@ func getKVCacheIndexerConfig() (*kvcache.Config, error) {
 	}
 
 	config.TokenizersPoolConfig.ModelName = testdata.ModelName
+	ApplyTokenizerEndpoint(config)
 
-	huggingFaceToken := os.Getenv(envHFToken)
-	if huggingFaceToken != "" {
-		config.TokenizersPoolConfig.HFTokenizerConfig.HuggingFaceToken = huggingFaceToken
-	}
-
-	config.TokenizersPoolConfig.ModelName = testdata.ModelName
 	return config, nil
 }
 

@@ -1,5 +1,3 @@
-//go:build embedded_tokenizers
-
 /*
 Copyright 2025 The llm-d Authors.
 
@@ -20,7 +18,6 @@ package main
 
 import (
 	"context"
-	_ "embed"
 	"os"
 	"os/signal"
 	"syscall"
@@ -32,36 +29,8 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/examples/testdata"
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache"
-	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvevents"
 )
-
-const (
-	envHFToken = "HF_TOKEN"
-)
-
-func getKVCacheIndexerConfig() (*kvcache.Config, error) {
-	config, err := kvcache.NewDefaultConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	config.TokenizersPoolConfig.ModelName = testdata.ModelName
-
-	huggingFaceToken := os.Getenv(envHFToken)
-	if huggingFaceToken != "" {
-		config.TokenizersPoolConfig.HFTokenizerConfig.HuggingFaceToken = huggingFaceToken
-	}
-
-	config.TokenizersPoolConfig.ModelName = testdata.ModelName
-
-	return config, nil
-}
-
-func getTokenProcessorConfig() *kvblock.TokenProcessorConfig {
-	return &kvblock.TokenProcessorConfig{
-		BlockSize: 256,
-	}
-}
 
 func main() {
 	baseLogger := zap.New(zap.UseDevMode(true))
@@ -73,7 +42,7 @@ func main() {
 	logger := log.FromContext(ctx)
 	logger.Info("Starting KV Events Pool Example")
 
-	kvCacheIndexer, err := setupKVCacheIndexer(ctx)
+	kvCacheIndexer, err := helper.SetupKVCacheIndexer(ctx)
 	if err != nil {
 		logger.Error(err, "failed to setup KVCacheIndexer")
 		return
@@ -89,6 +58,18 @@ func main() {
 	// Start events pool
 	eventsPool.Start(ctx)
 	logger.Info("Events pool started and listening for ZMQ messages")
+
+	// Start a local subscriber bound to the publisher's endpoint so that
+	// the publisher's Dial() has a socket to connect to. (go-zeromq's Dial
+	// is synchronous unlike C libzmq's non-blocking zmq_connect.)
+	const publisherEndpoint = "tcp://localhost:5557"
+	subManager := kvevents.NewSubscriberManager(eventsPool)
+	if err := subManager.EnsureSubscriber(ctx, "local-sim", publisherEndpoint, "kv@", false); err != nil {
+		logger.Error(err, "failed to start local subscriber")
+		return
+	}
+	// Give the subscriber goroutine time to call Listen() before the publisher Dials.
+	time.Sleep(50 * time.Millisecond)
 
 	// Setup ZMQ publisher to simulate vLLM engines
 	publisher, err := helper.SetupPublisher(ctx)
@@ -114,40 +95,12 @@ func main() {
 		return
 	}
 
-	// Wait for shutdown signal
-	<-ctx.Done()
 	logger.Info("Shutting down...")
 
 	// Graceful shutdown of events pool
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 	eventsPool.Shutdown(shutdownCtx)
-}
-
-func setupKVCacheIndexer(ctx context.Context) (*kvcache.Indexer, error) {
-	logger := log.FromContext(ctx)
-
-	cfg, err := getKVCacheIndexerConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	tokenProcessor, err := kvblock.NewChunkedTokenDatabase(getTokenProcessorConfig())
-	if err != nil {
-		return nil, err
-	}
-
-	kvCacheIndexer, err := kvcache.NewKVCacheIndexer(ctx, cfg, tokenProcessor)
-	if err != nil {
-		return nil, err
-	}
-
-	logger.Info("Created Indexer")
-
-	go kvCacheIndexer.Run(ctx)
-	logger.Info("Started Indexer", "model", testdata.ModelName)
-
-	return kvCacheIndexer, nil
 }
 
 func RunEventsDemo(ctx context.Context, kvCacheIndexer *kvcache.Indexer, publisher *helper.Publisher) error {

@@ -48,17 +48,76 @@
 #include "file_io.hpp"
 #include "numa_utils.hpp"
 #include "thread_pool.hpp"
+#include "gds_file_io.hpp"
 #include "tensor_copier.hpp"
 #include "logger.hpp"
+#include "storage_handler.hpp"
 
 // Initialize IO threads, CUDA streams, and staging memory pool
 StorageOffloadEngine::StorageOffloadEngine(int io_threads,
                                            int gpu_blocks_per_file,
-                                           std::vector<torch::Tensor>& tensors)
+                                           std::vector<torch::Tensor>& tensors,
+                                           int read_preferring_workers,
+                                           const std::string& gds_mode_str)
     : m_tensor_copier(tensors, gpu_blocks_per_file),
-      m_thread_pool(io_threads,
-                    calc_staging_bytes(gpu_blocks_per_file, tensors),
-                    get_device_id()) {}
+      m_gds_mode(parse_gds_mode(gds_mode_str)),
+      m_thread_pool(
+          io_threads,
+          calc_staging_bytes(gpu_blocks_per_file, tensors, m_gds_mode),
+          get_device_id(),
+          read_preferring_workers),
+      m_gpu_blocks_per_file(gpu_blocks_per_file) {
+  init_handlers(m_gds_mode, tensors);
+}
+
+// Initialize read/write handlers based on GDS mode.
+// Creates a GdsFileIO if GDS is requested and available; falls back to FileIO
+// otherwise.
+void StorageOffloadEngine::init_handlers(
+    GdsMode gds_mode,
+    const std::vector<torch::Tensor>& tensors) {
+  std::shared_ptr<GdsFileIO> gds_io;
+
+  if (gds_mode != GdsMode::DISABLED) {
+    std::vector<std::pair<void*, size_t>> gpu_buffers;
+    for (const auto& tensor : tensors)
+      gpu_buffers.emplace_back(tensor.data_ptr(),
+                               tensor.numel() * tensor.element_size());
+
+    gds_io = std::make_shared<GdsFileIO>(gpu_buffers,
+                                         m_tensor_copier.get_block_size(),
+                                         gds_mode,
+                                         m_tensor_copier);
+
+    if (!gds_io->is_gds_available()) {
+      FS_LOG_WARN(
+          "StorageOffloadEngine: GDS initialization failed, "
+          "falling back to CPU_BUFFER_STAGE for both READ and WRITE");
+      gds_io = nullptr;
+    }
+  }
+
+  m_read_handler = (gds_io && gds_io->use_for_read())
+                       ? std::shared_ptr<StorageHandler>(gds_io)
+                       : std::make_shared<FileIO>(m_tensor_copier);
+  m_write_handler = (gds_io && gds_io->use_for_write())
+                        ? std::shared_ptr<StorageHandler>(gds_io)
+                        : std::make_shared<FileIO>(m_tensor_copier);
+
+  auto mode_str = [](StorageMode m) {
+    switch (m) {
+      case StorageMode::GDS_DIRECT:
+        return "GDS_DIRECT";
+      case StorageMode::GDS_BOUNCE_BUFFER:
+        return "GDS_BOUNCE_BUFFER";
+      default:
+        return "CPU";
+    }
+  };
+  FS_LOG_INFO("StorageOffloadEngine: READ="
+              << mode_str(m_read_handler->get_mode())
+              << " WRITE=" << mode_str(m_write_handler->get_mode()));
+}
 
 // Get current device (should be set by vLLM before calling this)
 int StorageOffloadEngine::get_device_id() {
@@ -69,10 +128,11 @@ int StorageOffloadEngine::get_device_id() {
   }
   return device_id;
 }
-// Calculate staging buffer size in bytes
+// Calculate staging buffer size in bytes.
 size_t StorageOffloadEngine::calc_staging_bytes(
     int gpu_blocks_per_file,
-    const std::vector<torch::Tensor>& tensors) {
+    const std::vector<torch::Tensor>& tensors,
+    GdsMode gds_mode) {
   size_t block_size_in_bytes = 0;
   for (const auto& tensor : tensors) {
     block_size_in_bytes += static_cast<size_t>(tensor.stride(0)) *
@@ -164,66 +224,53 @@ bool StorageOffloadEngine::async_store_gpu_blocks(
     std::string dst_file = dst_files[i];
     auto block_ids = all_block_ids[i];
 
-    auto future = m_thread_pool.enqueue([this,
-                                         dst_file,
-                                         block_ids,
-                                         job_state,
-                                         gpu_kvs_ready_event]() -> bool {
-      // Check if dst_file file already exists - skip write if it does
-      if (std::ifstream(dst_file).good()) {
-        update_atime(dst_file);
-        job_state->completed_tasks.fetch_add(1);
-        return true;  // File exists
-      }
+    auto future = m_thread_pool.enqueue(
+        [this, dst_file, block_ids, job_state, gpu_kvs_ready_event]() -> bool {
+          // Check if dst_file file already exists - skip write if it does
+          if (std::ifstream(dst_file).good()) {
+            FileIO::update_atime(dst_file);
+            job_state->completed_tasks.fetch_add(1);
+            return true;  // File exists
+          }
 
-      // Wait for default stream to complete before starting the copy
-      auto& tls_stream = ThreadPool::get_tls_stream();
-      cudaStreamWaitEvent(tls_stream.stream(), gpu_kvs_ready_event.get(), 0);
+          // Wait for default stream to complete before starting the copy
+          auto& tls_stream = ThreadPool::get_tls_stream();
+          cudaStreamWaitEvent(tls_stream.stream(),
+                              gpu_kvs_ready_event.get(),
+                              0);
+          bool success = false;
+          // Execute the write operation using polymorphic storage handler
+          try {
+            size_t total_size =
+                block_ids.size() * m_tensor_copier.get_block_size();
+            success = TIME_EXPR_THROUGHPUT(
+                "write: storage handler",
+                m_write_handler->write_blocks_to_file(dst_file,
+                                                      block_ids,
+                                                      tls_stream.stream()),
+                total_size,
+                "file:",
+                dst_file,
+                " blocks:",
+                block_ids.size());
+            job_state->completed_tasks.fetch_add(1);
+            if (!success) {
+              FS_LOG_ERROR("Store failed during file write: " << dst_file);
+            }
+            return success;
 
-      StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
-      auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
-      bool is_store = true;
-      bool success = false;
-
-      // Execute the copy operation
-      try {
-        // Stage 1: copy tensors from GPU to staging CPU tensor.
-        TIME_EXPR("write phase 1: copy_blocks ",
-                  m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
-                  "file: ",
-                  dst_file);
-        cudaError_t err = cudaStreamSynchronize(tls_stream.stream());
-        job_state->completed_tasks.fetch_add(1);
-
-        if (err != cudaSuccess) {
-          FS_LOG_ERROR(
-              "cudaStreamSynchronize failed: " << cudaGetErrorString(err));
-          // job_state->all_success = false; // TODO- silent
-          // ignore read failures for now offloading connector not able to
-          // handle failures
-          return false;
-        }
-        // Stage 2: Write the cpu tensor to disk.
-        success = TIME_EXPR("write phase 2: write_buffer_to_file",
-                            write_buffer_to_file(buf, dst_file),
-                            "file:",
-                            dst_file,
-                            " size:",
-                            buf.size);
-        if (!success) {
-          FS_LOG_ERROR("Store failed during file write: " << dst_file);
-          return success;
-        }
-      } catch (const std::exception& e) {
-        FS_LOG_ERROR("Store failed for " << dst_file << ": " << e.what());
-        success = false;
-      } catch (...) {
-        FS_LOG_ERROR("Store failed for " << dst_file << " (unknown exception)");
-        success = false;
-      }
-
-      return success;
-    });
+          } catch (const std::exception& e) {
+            FS_LOG_ERROR("Store failed for " << dst_file << ": " << e.what());
+            job_state->completed_tasks.fetch_add(1);
+            return false;
+          } catch (...) {
+            FS_LOG_ERROR("Store failed for " << dst_file
+                                             << " (unknown exception)");
+            job_state->completed_tasks.fetch_add(1);
+            return false;
+          }
+        },
+        TaskPriority::kNormal);
     // Convert std::future -> std::shared_future, which is copyable and can
     // be waited on by multiple threads.
     job_state->futures.push_back(future.share());
@@ -248,9 +295,9 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
   for (size_t i = 0; i < src_files.size(); i++) {
     std::string src_file = src_files[i];
     auto block_ids = all_block_ids[i];
-    auto future =
-        m_thread_pool.enqueue([this, src_file, block_ids, job_state]() -> bool {
-          StagingBufferInfo& buf = ThreadPool::get_staging_buffer();
+    auto future = m_thread_pool.enqueue(
+        [this, src_file, block_ids, job_state]() -> bool {
+          auto& tls_stream = ThreadPool::get_tls_stream();
           bool success = false;
 
           ScopeGuard completion([&]() {
@@ -260,46 +307,34 @@ bool StorageOffloadEngine::async_load_gpu_blocks(
             // handle failures
           });
 
+          // Execute the read operation using polymorphic storage handler
           try {
-            // Stage 1: Read file to staging CPU tensor.
-            // Read data from disk into a tensor.
-            success = TIME_EXPR("read phase 1: read_buffer_from_file",
-                                read_buffer_from_file(src_file, buf),
-                                "file:",
-                                src_file);
+            size_t total_size =
+                block_ids.size() * m_tensor_copier.get_block_size();
+            success = TIME_EXPR_THROUGHPUT(
+                "read: storage handler",
+                m_read_handler->read_blocks_from_file(src_file,
+                                                      block_ids,
+                                                      tls_stream.stream()),
+                total_size,
+                "file:",
+                src_file,
+                " blocks:",
+                block_ids.size());
             if (!success) {
-              FS_LOG_ERROR("Stage1 read_buffer_from_file failed for "
-                           << src_file);
-              return success;
+              FS_LOG_ERROR("Load failed for " << src_file);
             }
-            // Stage 2:  copy tensors from staging CPU tensor to GPU.
-            // Perform asynchronous GPU copy and tensor swap.
-            auto* cpu_base = static_cast<uint8_t*>(buf.ptr);
-            bool is_store = false;
-            // Execute the copy operation
-            success = TIME_EXPR(
-                "read phase 2: copy_cpu_tensor_to_gpu_tensors",
-                m_tensor_copier.copy_blocks(cpu_base, block_ids, is_store),
-                "file: ",
-                src_file);
+            return success;
 
-            auto& tls_stream = ThreadPool::get_tls_stream();
-            cudaError_t err = cudaStreamSynchronize(tls_stream.stream());
-            if (err != cudaSuccess) {
-              FS_LOG_ERROR(
-                  "cudaStreamSynchronize failed: " << cudaGetErrorString(err));
-              return false;
-            }
           } catch (const std::exception& e) {
             FS_LOG_ERROR("Load failed for " << src_file << ": " << e.what());
-            success = false;
+            return false;
           } catch (...) {
             FS_LOG_ERROR("Load unknown failure for " << src_file);
-            success = false;
+            return false;
           }
-
-          return success;
-        });
+        },
+        TaskPriority::kHigh);
 
     // Convert std::future -> std::shared_future - is copyable and can be
     // waited on by multiple threads.

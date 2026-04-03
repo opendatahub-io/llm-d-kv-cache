@@ -1,17 +1,27 @@
 PYTHON ?= python3
 WHEEL_DIR = wheels
 DIST_DIR = dist
+VERSION := $(shell $(PYTHON) -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
 
-.PHONY: wheel build test clean
+.PHONY: wheel build test clean check-gds
 
 # Install build dependencies
 deps:
 	$(PYTHON) -m pip install --upgrade pip setuptools wheel build ninja numpy
 
+# Check if GDS (cuFile) is available at runtime
+check-gds:
+	@echo "Checking for GPUDirect Storage (cuFile) runtime availability..."
+	@if ldconfig -p 2>/dev/null | grep -q libcufile.so; then \
+		echo "✓ cuFile library found - GDS will be available at runtime"; \
+	else \
+		echo "✗ cuFile library not found - GDS will not be available at runtime (CPU buffer staging only)"; \
+	fi
+
 # Build wheel into dist/ and copy .whl into wheels/
 wheel: deps
 	$(PYTHON) -m pip wheel . -w $(DIST_DIR)
-	cp $(DIST_DIR)/llmd_fs_connector-*.whl $(WHEEL_DIR)/
+	cp $(DIST_DIR)/llmd_fs_connector-$(VERSION)-*.whl $(WHEEL_DIR)/
 	@echo ""
 	@echo "Wheel created in $(WHEEL_DIR):"
 	@ls -lh $(WHEEL_DIR)
@@ -22,7 +32,7 @@ build:
 
 # Run tests
 test:
-	pytest ./tests/test_fs_backend.py -v -sq
+	pytest ./tests/ -v -sq
 
 # Clean local build artifacts
 clean:

@@ -18,7 +18,7 @@ The service exposes gRPC methods over UDS and HTTP endpoints for health/config:
 
 1. `TokenizationService.Tokenize` - Tokenize text via gRPC (UDS only)
 2. `TokenizationService.RenderChatTemplate` - Apply chat template via gRPC (UDS only)
-3. `/health` - Health check endpoint (TCP port, for Kubernetes probes)
+3. `/healthz` - Health check endpoint (TCP port, for Kubernetes probes)
 4. `/config` - Get or update configuration (TCP port)
 
 ## Quick Start
@@ -40,7 +40,6 @@ Before using tokenization methods, initialize the tokenizer for a specific model
 | Variable | Description | Default |
 |---------|-------------|---------|
 | `LOG_LEVEL` | Log level (DEBUG, INFO, WARNING, ERROR, CRITICAL) | INFO |
-| `THREAD_POOL_SIZE` | Number of worker threads for all CPU-intensive operations | 2 * CPU cores (limited by container resources, max 32) |
 | `PROBE_PORT` | Port for health check endpoint | 8082 |
 | `USE_MODELSCOPE` | Whether to download tokenizer files from ModelScope (true) or Hugging Face (false) | false |
 | `ENABLE_GRPC_REFLECTION` | Enable gRPC server reflection for service discovery | disabled |
@@ -111,7 +110,7 @@ Response:
 
 ## HTTP Endpoints
 
-### GET /health
+### GET /healthz
 Health check endpoint for Kubernetes probes.
 
 Response:
@@ -246,40 +245,6 @@ From the repository root:
 make uds-tokenizer-service-test
 ```
 
-## Building Container Images
-
-The project provides two Dockerfiles for different deployment targets:
-
-### ODH (Open Data Hub) Build
-
-Uses standard Python base image and `pyproject.toml`:
-
-```bash
-podman build -f Dockerfile .
-```
-
-### RHDS Build
-
-Uses Red Hat UBI base image and `requirements.txt`:
-
-```bash
-podman build -f Dockerfile.konflux .
-```
-
-### Dependency Management
-
-- **pyproject.toml**: Defines direct dependencies for the project
-- **requirements.txt**: Generated from `uv.lock` for Konflux builds only
-
-To regenerate `requirements.txt` after updating dependencies:
-
-```bash
-# Update dependencies in pyproject.toml
-# Then regenerate the lock file and requirements.txt
-uv lock
-uv export --format requirements-txt --no-hashes --output-file requirements.txt
-```
-
 ## Kubernetes Deployment
 
 The service is designed to run in Kubernetes with:
@@ -307,25 +272,21 @@ See [tokenizers/README.md](tokenizers/README.md) for detailed information about 
 ```
 ├── run_grpc_server.py       # Main gRPC server entry point
 ├── tokenizer_grpc_service.py # gRPC service implementation
-├── Dockerfile               # Container build file (ODH)
-├── Dockerfile.konflux       # Container build file (RHDS/Konflux)
-├── pyproject.toml           # Direct dependencies (used by Dockerfile)
-├── requirements.txt         # Generated from uv.lock (used by Dockerfile.konflux)
+├── pyproject.toml           # Dependencies and package config
 ├── tokenizer_service/       # Core tokenizer service implementation
 │   ├── __init__.py
 │   ├── tokenizer.py         # Tokenizer service implementation
 │   └── exceptions.py        # Custom exceptions
-├── tokenizerpb/             # gRPC service definition
+├── tokenizerpb/              # gRPC service definition
 │   ├── tokenizer_pb2_grpc.py
 │   └── tokenizer_pb2.py
 ├── utils/                   # Utility functions
 │   ├── __init__.py
-│   ├── logger.py            # Logger functionality
-│   └── thread_pool_utils.py # Thread pool utilities
+│   └── logger.py            # Logger functionality
 ├── tests/                   # Test files
 │   ├── __init__.py
-│   ├── conftest.py          # Shared fixtures (in-process gRPC server)
-│   └── test_integration.py  # Integration tests (pytest)
+│   ├── conftest.py              # Shared fixtures (in-process gRPC server)
+│   ├── test_integration.py      # Integration tests (pytest)
 ├── tokenizers/              # Tokenizer files (downloaded automatically)
 └── README.md                # This file
 ```

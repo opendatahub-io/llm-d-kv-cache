@@ -18,16 +18,21 @@ package tokenization
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"strings"
 	"time"
 
-	tokenizerpb "github.com/llm-d/llm-d-kv-cache/api/tokenizerpb"
-	types "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
+	"sigs.k8s.io/controller-runtime/pkg/log"
+
+	tokenizerpb "github.com/llm-d/llm-d-kv-cache/api/tokenizerpb"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	types "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
+	"github.com/llm-d/llm-d-kv-cache/pkg/utils/logging"
 )
 
 // UdsTokenizerConfig represents the configuration for the UDS-based tokenizer,
@@ -68,6 +73,8 @@ const (
 
 	// Default timeout for requests.
 	defaultTimeout = 5 * time.Second
+	// Timeout for multimodal requests (image download + processing).
+	mmTimeout = 30 * time.Second
 )
 
 // NewUdsTokenizer creates a new UDS-based tokenizer client with connection pooling.
@@ -105,8 +112,8 @@ func NewUdsTokenizer(ctx context.Context, config *UdsTokenizerConfig, modelName 
 		address,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                5 * time.Minute,
-			Timeout:             time.Second,
+			Time:                10 * time.Minute,
+			Timeout:             10 * time.Second,
 			PermitWithoutStream: true,
 		}),
 		grpc.WithDefaultCallOptions(
@@ -136,6 +143,10 @@ func NewUdsTokenizer(ctx context.Context, config *UdsTokenizerConfig, modelName 
 	if err := udsTokenizer.initializeTokenizerForModel(ctx); err != nil {
 		return nil, fmt.Errorf("failed to initialize tokenizer for model %s: %w", modelName, err)
 	}
+
+	// Warm up the renderer with a minimal request to force any lazy
+	// downloads (e.g. image processor configs for multimodal models).
+	udsTokenizer.warmup(ctx)
 
 	return udsTokenizer, nil
 }
@@ -182,8 +193,47 @@ func (u *UdsTokenizer) initializeTokenizerForModel(ctx context.Context) error {
 	return fmt.Errorf("tokenizer initialization failed after %d attempts: %w", maxRetries, lastErr)
 }
 
+// warmup sends a minimal text request to force any lazy downloads in the
+// renderer (e.g. image processor configs for multimodal models). Failures
+// are logged but not fatal — the first real request will retry.
+func (u *UdsTokenizer) warmup(ctx context.Context) {
+	warmupCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	addGen := true
+	_, err := u.client.RenderChatCompletion(warmupCtx, &tokenizerpb.RenderChatCompletionRequest{
+		ModelName: u.model,
+		Messages: []*tokenizerpb.ChatMessage{{
+			Role:    "user",
+			Content: strPtr("warmup"),
+		}},
+		AddGenerationPrompt: &addGen,
+	})
+	if err != nil {
+		log.FromContext(ctx).V(logging.DEBUG).Info("Renderer warmup failed (non-critical)", "model", u.model, "error", err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// Render tokenizes a plain-text prompt via the UDS renderer service.
 func (u *UdsTokenizer) Render(prompt string) ([]uint32, []types.Offset, error) {
-	return u.Encode(prompt, true)
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
+	resp, err := u.client.RenderCompletion(ctx, &tokenizerpb.RenderCompletionRequest{
+		ModelName: u.model,
+		Prompt:    prompt,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("gRPC RenderCompletion request failed: %w", err)
+	}
+
+	if !resp.Success {
+		return nil, nil, fmt.Errorf("render completion failed: %s", resp.ErrorMessage)
+	}
+
+	return resp.TokenIds, nil, nil
 }
 
 // Encode tokenizes the input string and returns the token IDs and offsets.
@@ -225,98 +275,125 @@ func (u *UdsTokenizer) Encode(prompt string, addSpecialTokens bool) ([]uint32, [
 	return resp.InputIds, tokenizersOffsets, nil
 }
 
-// RenderChat renders a chat template using the UDS tokenizer service.
+// RenderChat renders a chat completion request using the UDS renderer service.
+// It calls the RenderChatCompletion RPC which runs vLLM's OpenAIServingRender
+// on the CPU, returning token IDs and optional multimodal features.
 func (u *UdsTokenizer) RenderChat(
 	renderReq *types.RenderChatRequest,
-) ([]uint32, []types.Offset, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+) ([]uint32, *MultiModalFeatures, error) {
+	timeout := defaultTimeout
+	for _, msg := range renderReq.Conversation {
+		if len(msg.Content.Structured) > 0 {
+			timeout = mmTimeout
+			break
+		}
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	// Convert conversation messages to proto format
+	traceLogger := log.FromContext(ctx).V(logging.TRACE).WithName("UdsTokenizer.RenderChat")
 	messages := make([]*tokenizerpb.ChatMessage, 0, len(renderReq.Conversation))
 	for _, msg := range renderReq.Conversation {
-		messages = append(messages, &tokenizerpb.ChatMessage{
-			Role:    msg.Role,
-			Content: msg.Content,
-		})
-	}
-	conversationTurns := []*tokenizerpb.ConversationTurn{
-		{Messages: messages},
+		pbMsg := &tokenizerpb.ChatMessage{Role: msg.Role}
+		if len(msg.Content.Structured) > 0 {
+			parts := make([]*tokenizerpb.ContentPart, 0, len(msg.Content.Structured))
+			for _, block := range msg.Content.Structured {
+				part := &tokenizerpb.ContentPart{Type: block.Type}
+				switch block.Type {
+				case "text":
+					text := block.Text
+					part.Text = &text
+				case "image_url":
+					part.ImageUrl = &tokenizerpb.ImageUrl{Url: block.ImageURL.URL}
+				default:
+					traceLogger.Info("dropping unsupported chat message content block type, it will not be rendered", "type", block.Type)
+					continue
+				}
+				parts = append(parts, part)
+			}
+			pbMsg.ContentParts = parts
+		} else {
+			content := msg.Content.Raw
+			pbMsg.Content = &content
+		}
+		messages = append(messages, pbMsg)
 	}
 
-	// Convert ChatTemplateKWArgs
-	chatTemplateKwargs := make(map[string]*tokenizerpb.Value)
-	for k, v := range renderReq.ChatTemplateKWArgs {
-		chatTemplateKwargs[k] = ConvertToProtoValue(v)
+	// Convert tools to JSON string
+	var toolsJSON *string
+	if len(renderReq.Tools) > 0 {
+		b, err := json.Marshal(renderReq.Tools)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal tools: %w", err)
+		}
+		s := string(b)
+		toolsJSON = &s
 	}
 
-	req := &tokenizerpb.ChatTemplateRequest{
-		ConversationTurns:         conversationTurns,
-		ChatTemplate:              renderReq.ChatTemplate,
-		ReturnAssistantTokensMask: renderReq.ReturnAssistantTokensMask,
-		ContinueFinalMessage:      renderReq.ContinueFinalMessage,
-		AddGenerationPrompt:       renderReq.AddGenerationPrompt,
-		ChatTemplateKwargs:        chatTemplateKwargs,
-		ModelName:                 u.model,
+	// Convert ChatTemplateKWArgs to JSON string
+	var chatTemplateKwargsJSON *string
+	if len(renderReq.ChatTemplateKWArgs) > 0 {
+		b, err := json.Marshal(renderReq.ChatTemplateKWArgs)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to marshal chat_template_kwargs: %w", err)
+		}
+		s := string(b)
+		chatTemplateKwargsJSON = &s
 	}
 
-	resp, err := u.client.RenderChatTemplate(ctx, req)
+	resp, err := u.client.RenderChatCompletion(ctx, &tokenizerpb.RenderChatCompletionRequest{
+		ModelName:            u.model,
+		Messages:             messages,
+		ToolsJson:            toolsJSON,
+		ChatTemplate:         renderReq.ChatTemplate,
+		AddGenerationPrompt:  &renderReq.AddGenerationPrompt,
+		ContinueFinalMessage: renderReq.ContinueFinalMessage,
+		ChatTemplateKwargs:   chatTemplateKwargsJSON,
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("gRPC chat-template request failed: %w", err)
+		return nil, nil, fmt.Errorf("gRPC RenderChatCompletion request failed: %w", err)
 	}
 
 	if !resp.Success {
-		return nil, nil, fmt.Errorf("chat template rendering failed: %s", resp.ErrorMessage)
+		return nil, nil, fmt.Errorf("render chat completion failed: %s", resp.ErrorMessage)
 	}
 
-	return u.Encode(resp.RenderedPrompt, false)
+	var features *MultiModalFeatures
+	if resp.Features != nil {
+		features = convertProtoFeatures(resp.Features)
+	}
+
+	return resp.TokenIds, features, nil
 }
 
-// ConvertToProtoValue converts a Go interface{} value to a protobuf Value.
-// It handles common types including strings, numbers, booleans, slices, and maps.
-// Unrecognized types are converted to string representation.
-func ConvertToProtoValue(v interface{}) *tokenizerpb.Value {
-	if v == nil {
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_StringValue{StringValue: ""},
-		}
+// convertProtoFeatures converts proto MultiModalFeatures to domain type.
+func convertProtoFeatures(pf *tokenizerpb.MultiModalFeatures) *MultiModalFeatures {
+	if pf == nil {
+		return nil
 	}
 
-	switch val := v.(type) {
-	case string:
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_StringValue{StringValue: val},
-		}
-	case float64:
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_NumberValue{NumberValue: val},
-		}
-	case bool:
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_BoolValue{BoolValue: val},
-		}
-	case []interface{}:
-		listValues := make([]*tokenizerpb.Value, len(val))
-		for i, item := range val {
-			listValues[i] = ConvertToProtoValue(item)
-		}
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_ListValue{ListValue: &tokenizerpb.ListValue{Values: listValues}},
-		}
-	case map[string]interface{}:
-		structValues := make(map[string]*tokenizerpb.Value)
-		for k, v := range val {
-			structValues[k] = ConvertToProtoValue(v)
-		}
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_StructValue{StructValue: &tokenizerpb.StructValue{Fields: structValues}},
-		}
-	default:
-		// For unrecognized types, convert to string
-		return &tokenizerpb.Value{
-			Value: &tokenizerpb.Value_StringValue{StringValue: fmt.Sprintf("%v", val)},
-		}
+	features := &MultiModalFeatures{
+		MMHashes:       make(map[string][]string, len(pf.MmHashes)),
+		MMPlaceholders: make(map[string][]kvblock.PlaceholderRange, len(pf.MmPlaceholders)),
 	}
+
+	for modality, sl := range pf.MmHashes {
+		features.MMHashes[modality] = sl.Values
+	}
+
+	for modality, pl := range pf.MmPlaceholders {
+		ranges := make([]kvblock.PlaceholderRange, len(pl.Ranges))
+		for i, r := range pl.Ranges {
+			ranges[i] = kvblock.PlaceholderRange{
+				Offset: int(r.Offset),
+				Length: int(r.Length),
+			}
+		}
+		features.MMPlaceholders[modality] = ranges
+	}
+
+	return features
 }
 
 func (u *UdsTokenizer) Type() string {

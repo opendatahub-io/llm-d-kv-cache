@@ -27,7 +27,6 @@ import (
 	tokenizerpb "github.com/llm-d/llm-d-kv-cache/api/tokenizerpb"
 	. "github.com/llm-d/llm-d-kv-cache/pkg/tokenization"
 	types "github.com/llm-d/llm-d-kv-cache/pkg/tokenization/types"
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
 	"google.golang.org/grpc"
@@ -40,6 +39,7 @@ type mockTokenizationServer struct {
 	tokenizeError   bool
 	chatError       bool
 	initialized     map[string]bool
+	mmFeatures      *tokenizerpb.MultiModalFeatures
 }
 
 func newMockTokenizationServer() *mockTokenizationServer {
@@ -104,36 +104,58 @@ func (m *mockTokenizationServer) Tokenize(
 	}, nil
 }
 
-func (m *mockTokenizationServer) RenderChatTemplate(
-	ctx context.Context,
-	req *tokenizerpb.ChatTemplateRequest,
-) (*tokenizerpb.ChatTemplateResponse, error) {
+func (m *mockTokenizationServer) RenderChatCompletion(
+	_ context.Context,
+	req *tokenizerpb.RenderChatCompletionRequest,
+) (*tokenizerpb.RenderChatCompletionResponse, error) {
 	if m.chatError {
-		return &tokenizerpb.ChatTemplateResponse{
+		return &tokenizerpb.RenderChatCompletionResponse{
 			Success:      false,
-			ErrorMessage: "mock chat template error",
+			ErrorMessage: "mock render chat completion error",
 		}, nil
 	}
 
-	// Check if model was initialized (matches real service behavior)
-	if !m.initialized[req.ModelName] {
-		return &tokenizerpb.ChatTemplateResponse{
-			Success:      false,
-			ErrorMessage: fmt.Sprintf("model %s not initialized", req.ModelName),
-		}, nil
-	}
-
-	// Mock chat template rendering by concatenating messages
-	rendered := ""
-	for _, turn := range req.ConversationTurns {
-		for _, msg := range turn.Messages {
-			rendered += fmt.Sprintf("%s: %s\n", msg.Role, msg.Content)
+	// Produce fake token IDs from native proto message content.
+	var tokens []uint32
+	for _, msg := range req.Messages {
+		for _, r := range msg.GetContent() {
+			tokens = append(tokens, uint32(r))
 		}
 	}
 
-	return &tokenizerpb.ChatTemplateResponse{
-		RenderedPrompt: rendered,
-		Success:        true,
+	resp := &tokenizerpb.RenderChatCompletionResponse{
+		RequestId: "mock-request-id",
+		TokenIds:  tokens,
+		Success:   true,
+	}
+
+	if m.mmFeatures != nil {
+		resp.Features = m.mmFeatures
+	}
+
+	return resp, nil
+}
+
+func (m *mockTokenizationServer) RenderCompletion(
+	_ context.Context,
+	req *tokenizerpb.RenderCompletionRequest,
+) (*tokenizerpb.RenderCompletionResponse, error) {
+	if m.tokenizeError {
+		return &tokenizerpb.RenderCompletionResponse{
+			Success:      false,
+			ErrorMessage: "mock render completion error",
+		}, nil
+	}
+
+	tokens := make([]uint32, 0, len(req.Prompt))
+	for _, r := range req.Prompt {
+		tokens = append(tokens, uint32(r))
+	}
+
+	return &tokenizerpb.RenderCompletionResponse{
+		RequestId: "mock-request-id",
+		TokenIds:  tokens,
+		Success:   true,
 	}, nil
 }
 
@@ -269,31 +291,23 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_ModelNotInMap() {
 }
 
 func (s *UdsTokenizerTestSuite) TestUdsTokenizer_Render() {
-	// Test Render - character-based tokenization
 	input := "hello world"
 	tokens, offsets, err := s.tokenizer.Render(input)
 	s.Require().NoError(err)
-
-	// Each character becomes a token
 	s.Assert().Equal(len([]rune(input)), len(tokens))
-	s.Assert().Equal(len([]rune(input)), len(offsets))
+	s.Assert().Nil(offsets, "RenderCompletion does not return character offsets")
 
-	// Verify specific characters
-	s.Assert().Equal(uint32('h'), tokens[0])  // 'h' = 104
-	s.Assert().Equal(uint32(' '), tokens[5])  // space at position 5 = 32
-	s.Assert().Equal(uint32('d'), tokens[10]) // 'd' at end = 100
-
-	// Verify offsets
-	s.Assert().Equal(types.Offset{0, 1}, offsets[0]) // 'h'
-	s.Assert().Equal(types.Offset{5, 6}, offsets[5]) // space
+	// Verify specific characters (mock converts runes to token IDs)
+	s.Assert().Equal(uint32('h'), tokens[0])
+	s.Assert().Equal(uint32(' '), tokens[5])
+	s.Assert().Equal(uint32('d'), tokens[10])
 }
 
 func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChat() {
-	// Test RenderChat
 	renderReq := &types.RenderChatRequest{
 		Conversation: []types.Conversation{
-			{Role: "user", Content: "Hello"},
-			{Role: "assistant", Content: "Hi there"},
+			{Role: "user", Content: types.Content{Raw: "Hello"}},
+			{Role: "assistant", Content: types.Content{Raw: "Hi there"}},
 		},
 		AddGenerationPrompt: true,
 		ChatTemplateKWArgs: map[string]interface{}{
@@ -302,10 +316,9 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChat() {
 		},
 	}
 
-	tokens, offsets, err := s.tokenizer.RenderChat(renderReq)
+	tokens, _, err := s.tokenizer.RenderChat(renderReq)
 	s.Require().NoError(err)
 	s.Assert().Greater(len(tokens), 0, "should return tokens from rendered chat")
-	s.Assert().Equal(len(tokens), len(offsets), "offsets should match token count")
 }
 
 func (s *UdsTokenizerTestSuite) TestUdsTokenizer_Type() {
@@ -317,177 +330,72 @@ func (s *UdsTokenizerTestSuite) TestUdsTokenizer_TokenizeError() {
 
 	_, _, err := s.tokenizer.Render("test")
 	s.Assert().Error(err)
-	s.Assert().Contains(err.Error(), "tokenization failed")
+	s.Assert().Contains(err.Error(), "render completion failed")
 }
 
-func (s *UdsTokenizerTestSuite) TestUdsTokenizer_ChatTemplateError() {
+func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatTemplateError() {
 	s.mockServer.chatError = true
 
 	renderReq := &types.RenderChatRequest{
 		Conversation: []types.Conversation{
-			{Role: "user", Content: "Hello"},
+			{Role: "user", Content: types.Content{Raw: "Hello"}},
 		},
 	}
 
 	_, _, err := s.tokenizer.RenderChat(renderReq)
 	s.Assert().Error(err)
-	s.Assert().Contains(err.Error(), "chat template rendering failed")
+	s.Assert().Contains(err.Error(), "render chat completion failed")
 }
 
-// convertFromProtoValue converts a proto Value back to a Go interface{} value.
-// This is used for testing round-trip conversions.
-func convertFromProtoValue(pv *tokenizerpb.Value) interface{} {
-	if pv == nil {
-		return nil
+func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatWithMultiModalFeatures() {
+	// Configure mock to return MM features.
+	s.mockServer.mmFeatures = &tokenizerpb.MultiModalFeatures{
+		MmHashes: map[string]*tokenizerpb.StringList{
+			"image": {Values: []string{"hash_img1", "hash_img2"}},
+		},
+		MmPlaceholders: map[string]*tokenizerpb.PlaceholderRangeList{
+			"image": {Ranges: []*tokenizerpb.PlaceholderRange{
+				{Offset: 10, Length: 100},
+				{Offset: 120, Length: 80},
+			}},
+		},
 	}
 
-	switch v := pv.Value.(type) {
-	case *tokenizerpb.Value_StringValue:
-		return v.StringValue
-	case *tokenizerpb.Value_NumberValue:
-		return v.NumberValue
-	case *tokenizerpb.Value_BoolValue:
-		return v.BoolValue
-	case *tokenizerpb.Value_ListValue:
-		result := make([]interface{}, len(v.ListValue.Values))
-		for i, item := range v.ListValue.Values {
-			result[i] = convertFromProtoValue(item)
-		}
-		return result
-	case *tokenizerpb.Value_StructValue:
-		result := make(map[string]interface{})
-		for k, val := range v.StructValue.Fields {
-			result[k] = convertFromProtoValue(val)
-		}
-		return result
-	default:
-		return nil
+	renderReq := &types.RenderChatRequest{
+		Conversation: []types.Conversation{
+			{Role: "user", Content: types.Content{Raw: "Describe these images"}},
+		},
+		AddGenerationPrompt: true,
 	}
+
+	tokens, features, err := s.tokenizer.RenderChat(renderReq)
+	s.Require().NoError(err)
+	s.Assert().Greater(len(tokens), 0)
+
+	// Verify MM features are propagated.
+	s.Require().NotNil(features, "multimodal features should be returned")
+	s.Require().Contains(features.MMHashes, "image")
+	s.Assert().Equal([]string{"hash_img1", "hash_img2"}, features.MMHashes["image"])
+
+	s.Require().Contains(features.MMPlaceholders, "image")
+	placeholders := features.MMPlaceholders["image"]
+	s.Require().Len(placeholders, 2)
+	s.Assert().Equal(10, placeholders[0].Offset)
+	s.Assert().Equal(100, placeholders[0].Length)
+	s.Assert().Equal(120, placeholders[1].Offset)
+	s.Assert().Equal(80, placeholders[1].Length)
 }
 
-func TestConvertToProtoValue(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    interface{}
-		expected interface{} // Only set when different from input
-	}{
-		{
-			name:     "nil value converts to empty string",
-			input:    nil,
-			expected: "",
+func (s *UdsTokenizerTestSuite) TestUdsTokenizer_RenderChatTextOnlyNoFeatures() {
+	// Default mock has no mmFeatures set.
+	renderReq := &types.RenderChatRequest{
+		Conversation: []types.Conversation{
+			{Role: "user", Content: types.Content{Raw: "Hello"}},
 		},
-		{
-			name:  "string value",
-			input: "test string",
-		},
-		{
-			name:  "empty string",
-			input: "",
-		},
-		{
-			name:  "float64 value",
-			input: 42.5,
-		},
-		{
-			name:  "zero float64",
-			input: float64(0),
-		},
-		{
-			name:  "negative float64",
-			input: -123.456,
-		},
-		{
-			name:  "bool true",
-			input: true,
-		},
-		{
-			name:  "bool false",
-			input: false,
-		},
-		{
-			name:  "empty slice",
-			input: []interface{}{},
-		},
-		{
-			name:  "simple slice",
-			input: []interface{}{"a", "b", "c"},
-		},
-		{
-			name:  "mixed slice",
-			input: []interface{}{"string", 42.0, true, false},
-		},
-		{
-			name:  "nested slice",
-			input: []interface{}{[]interface{}{"nested", 1.0}, []interface{}{2.0, "values"}},
-		},
-		{
-			name:  "empty map",
-			input: map[string]interface{}{},
-		},
-		{
-			name:  "simple map",
-			input: map[string]interface{}{"key1": "value1", "key2": "value2"},
-		},
-		{
-			name: "mixed map",
-			input: map[string]interface{}{
-				"string": "text",
-				"number": 42.0,
-				"bool":   true,
-			},
-		},
-		{
-			name: "nested map",
-			input: map[string]interface{}{
-				"outer": map[string]interface{}{
-					"inner1": "value1",
-					"inner2": 123.0,
-				},
-			},
-		},
-		{
-			name: "complex nested structure",
-			input: map[string]interface{}{
-				"users": []interface{}{
-					map[string]interface{}{"name": "Alice", "age": 30.0},
-					map[string]interface{}{"name": "Bob", "age": 25.0},
-				},
-				"metadata": map[string]interface{}{
-					"version": "1.0",
-					"active":  true,
-					"tags":    []interface{}{"tag1", "tag2"},
-				},
-			},
-		},
-		{
-			name:     "unrecognized type int converts to string",
-			input:    int(42),
-			expected: "42",
-		},
-		{
-			name:     "unrecognized type struct converts to string",
-			input:    struct{ name string }{name: "test"},
-			expected: "{test}",
-		},
+		AddGenerationPrompt: true,
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Convert to proto
-			protoValue := ConvertToProtoValue(tt.input)
-			require.NotNil(t, protoValue)
-
-			// Convert back to Go value
-			result := convertFromProtoValue(protoValue)
-
-			// Determine expected value
-			expected := tt.expected
-			if expected == nil {
-				expected = tt.input
-			}
-
-			// Verify round-trip conversion
-			assert.Equal(t, expected, result)
-		})
-	}
+	_, features, err := s.tokenizer.RenderChat(renderReq)
+	s.Require().NoError(err)
+	s.Assert().Nil(features, "text-only request should have nil features")
 }

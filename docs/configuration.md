@@ -324,6 +324,7 @@ Configures the ZMQ event processing pool for handling KV cache events. The pool 
 | `zmqEndpoint` | `string`                                                              | ZMQ address to connect to | `""`    |
 | `topicFilter` | `string`                                                              | ZMQ subscription filter | `"kv@"` |
 | `concurrency` | `integer`                                                             | Number of parallel workers | `4`     |
+| `engineType` | `string`                                                              | Inference engine adapter type (`"vllm"` or `"sglang"`) | `"vllm"` |
 | `discoverPods` | `boolean`                                                             | Enable Kubernetes pod reconciler for automatic per-pod subscriber management | `true`  |
 | `podDiscoveryConfig` | [PodDiscoveryConfig](#pod-discovery-configuration-podDiscoveryConfig) | Configuration for pod reconciler (only used when `discoverPods` is true) | `null`  |
 
@@ -336,6 +337,7 @@ For connecting to a single ZMQ endpoint:
   "zmqEndpoint": "tcp://indexer:5557",
   "topicFilter": "kv@",
   "concurrency": 8,
+  "engineType": "vllm",
   "discoverPods": false
 }
 ```

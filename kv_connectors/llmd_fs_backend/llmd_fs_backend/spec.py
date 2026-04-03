@@ -28,6 +28,7 @@ from llmd_fs_backend.manager import SharedStorageOffloadingManager
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
 from llmd_fs_backend.worker import (
     DEFAULT_MAX_STAGING_MEMORY_GB,
+    DEFAULT_READ_PREFERRING_WORKERS_RATIO,
     DEFAULT_THREADS_PER_GPU,
     StorageOffloadingHandlers,
 )
@@ -58,15 +59,28 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 "max_staging_memory_gb", DEFAULT_MAX_STAGING_MEMORY_GB
             )
         )  # Max staging CPU buffer in GB
+        # GDS mode: disabled, read_only, write_only, read_write,
+        # bb_read_only, bb_write_only, bb_read_write
+        self.gds_mode = str(self.extra_config.get("gds_mode", "disabled"))
 
         self.offloaded_block_size = int(
             self.extra_config.get("block_size", DEFAULT_STORAGE_BLOCK_SIZE)
         )
 
-        assert self.offloaded_block_size % self.gpu_block_size == 0, (
+        assert len(self.gpu_block_size) == 1, (
+            f"Expected exactly one KV cache group, got {len(self.gpu_block_size)}"
+        )
+
+        assert self.offloaded_block_size % self.gpu_block_size[0] == 0, (
             "offloaded_block_size must be a multiple of gpu_block_size"
         )
-        self.gpu_blocks_per_file = self.offloaded_block_size // self.gpu_block_size
+        self.gpu_blocks_per_file = self.offloaded_block_size // self.gpu_block_size[0]
+
+        self.read_preferring_ratio = float(
+            self.extra_config.get(
+                "read_preferring_ratio", DEFAULT_READ_PREFERRING_WORKERS_RATIO
+            )
+        )
 
         parallel_config = vllm_config.parallel_config
         tp_size = parallel_config.tensor_parallel_size
@@ -79,7 +93,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
         self.file_mapper = FileMapper(
             root_dir=shared_storage_path,
             model_name=vllm_config.model_config.model,
-            gpu_block_size=self.gpu_block_size,
+            gpu_block_size=self.gpu_block_size[0],
             gpu_blocks_per_file=self.gpu_blocks_per_file,
             tp_size=tp_size,
             pp_size=pp_size,
@@ -103,11 +117,12 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             self._handlers = StorageOffloadingHandlers(
                 file_mapper=self.file_mapper,
                 gpu_blocks_per_file=self.gpu_blocks_per_file,
-                gpu_block_size=self.gpu_block_size,
+                gpu_block_size=self.gpu_block_size[0],
                 attn_backends=attn_backends,
                 kv_caches=kv_caches,
                 threads_per_gpu=self.threads_per_gpu,
                 max_staging_memory_gb=self.max_staging_memory_gb,
+                gds_mode=self.gds_mode,
             )
 
         assert self._handlers is not None

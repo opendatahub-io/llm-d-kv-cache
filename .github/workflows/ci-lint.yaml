@@ -1,0 +1,87 @@
+name: CI - Lint
+
+on:
+  pull_request:
+    branches:
+      - main
+      - dev
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Cache system (apt) dependencies
+        uses: actions/cache@v4
+        with:
+          path: apt-archives
+          key: ${{ runner.os }}-apt-${{ hashFiles('**/.github/workflows/ci-lint.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-apt-
+
+      - name: Install system dependencies
+        run: |
+          mkdir -p apt-archives
+          sudo cp -a apt-archives /var/cache/apt/archives # workaround for apt-get cache https://github.com/actions/cache/issues/324#issuecomment-1816908646
+          sudo apt-get update
+          sudo apt-get install -y libzmq3-dev pkg-config python3.12-dev python3.12-venv clang-format
+          cp -a /var/cache/apt/archives/*.deb apt-archives 2>/dev/null || true
+
+      - name: Extract Go version from go.mod
+        run: sed -En 's/^go (.*)$/GO_VERSION=\1/p' go.mod >> "$GITHUB_ENV"
+
+      - name: Set up Go with cache
+        uses: actions/setup-go@v5
+        with:
+          go-version: "${{ env.GO_VERSION }}"
+          cache-dependency-path: ./go.sum
+
+      - name: Cache Python (pip) dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/pip
+            build/venv
+          # This key is based ONLY on the requirements file
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/.github/workflows/ci-lint.yaml') }}-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      #  Set up the Python virtual environment (includes Python config verification)
+      - name: Run setup-venv
+        run: make setup-venv
+
+      - name: Install dependencies
+        run: |
+          go mod download
+          make install-python-deps
+
+      - name: Run pre-commit hooks
+        id: pre-commit
+        uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --all-files --hook-stage manual
+
+      - name: Install golangci-lint without running it
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.1.6
+          args: "--help"
+
+      - name: Run precommit checks with CGo environment
+        run: |
+          # Export the CGO flags required for the linter to parse CGo files.
+          # This duplicates some logic from the Makefile but is necessary for the CI step.
+          CGO_CFLAGS="$(python3.12-config --cflags)"
+          CGO_LDFLAGS="$(python3.12-config --ldflags --embed) -ldl -lm"
+          export CGO_CFLAGS
+          export CGO_LDFLAGS
+          export CGO_ENABLED=1
+
+          # Now run the linting command from the Makefile
+          make precommit
+
+      - name: Run C/C++/CUDA formatting check
+        run: make clang

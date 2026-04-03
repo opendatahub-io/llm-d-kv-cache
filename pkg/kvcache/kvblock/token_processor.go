@@ -55,14 +55,24 @@ func DefaultTokenProcessorConfig() *TokenProcessorConfig {
 type TokenProcessor interface {
 	// TokensToKVBlockKeys converts tokens into kv_block.Keys.
 	// It accepts an optional parentKey to continue a hash chain.
+	// extraFeatures provides per-block multimodal data that taints the hash;
+	// nil means text-only (no taint). When non-nil, its length must match the
+	// number of token chunks.
 	// It returns a slice of generated Keys.
-	TokensToKVBlockKeys(parentKey BlockHash, tokens []uint32, modelName string) []BlockHash
+	TokensToKVBlockKeys(
+		parentKey BlockHash, tokens []uint32, modelName string,
+		extraFeatures []*BlockExtraFeatures,
+	) ([]BlockHash, error)
+
+	// BlockSize returns the number of tokens per block used by this processor.
+	BlockSize() int
 }
 
 // chunkedTokenDatabase is a concrete implementation of TokenDatabase.
 // It mimics the chunkedTokenDatabase in the Python code.
 type chunkedTokenDatabase struct {
 	TokenProcessorConfig
+	encoder cbor.EncMode // cached CBOR encoder for interoperable encoding
 }
 
 var _ TokenProcessor = &chunkedTokenDatabase{}
@@ -84,8 +94,14 @@ func NewChunkedTokenDatabase(config *TokenProcessorConfig) (TokenProcessor, erro
 		config.initHash = h.Sum64()
 	}
 
+	encoder, err := cbor.CanonicalEncOptions().EncMode()
+	if err != nil {
+		return nil, fmt.Errorf("failed to create CBOR encoder: %w", err)
+	}
+
 	return &chunkedTokenDatabase{
 		TokenProcessorConfig: *config,
+		encoder:              encoder,
 	}, nil
 }
 
@@ -107,13 +123,7 @@ func (db *chunkedTokenDatabase) getInitHash(modelName string) uint64 {
 func (db *chunkedTokenDatabase) hash(parent uint64, tokens []uint32, extra interface{}) uint64 {
 	payload := []interface{}{parent, tokens, extra}
 
-	encMode, err := cbor.CanonicalEncOptions().EncMode() // deterministic
-	if err != nil {
-		log.FromContext(context.Background()).Error(err, "failed to create CBOR encoder")
-		return 0
-	}
-
-	b, err := encMode.Marshal(payload)
+	b, err := db.encoder.Marshal(payload)
 	if err != nil {
 		log.FromContext(context.Background()).Error(err, "failed to marshal payload to CBOR")
 		return 0
@@ -125,21 +135,34 @@ func (db *chunkedTokenDatabase) hash(parent uint64, tokens []uint32, extra inter
 }
 
 // prefixHashes returns a slice of uint64 hashes.
-func (db *chunkedTokenDatabase) prefixHashes(parentHash uint64, tokenChunks [][]uint32) []uint64 {
+// extraFeatures must be the same length as tokenChunks (callers guarantee this).
+func (db *chunkedTokenDatabase) prefixHashes(
+	parentHash uint64, tokenChunks [][]uint32, extraFeatures []*BlockExtraFeatures,
+) []uint64 {
 	prefix := parentHash
 	hashes := make([]uint64, len(tokenChunks))
 	for i, chunk := range tokenChunks {
-		prefix = db.hash(prefix, chunk, nil)
+		var extra interface{}
+		if extraFeatures[i] != nil {
+			extra = extraFeatures[i].MMHashes
+		}
+		prefix = db.hash(prefix, chunk, extra)
 		hashes[i] = prefix
 	}
 	return hashes
 }
 
-// chunkTokens splits the input slice of tokens into chunks of size chunkSize.
+// BlockSize returns the number of tokens per block.
+func (db *chunkedTokenDatabase) BlockSize() int {
+	return db.TokenProcessorConfig.BlockSize
+}
+
+// chunkTokens splits the input slice of tokens into chunks of size blockSize.
 func (db *chunkedTokenDatabase) chunkTokens(tokens []uint32) [][]uint32 {
+	bs := db.TokenProcessorConfig.BlockSize
 	var chunks [][]uint32
-	for i := 0; i < len(tokens); i += db.BlockSize {
-		end := i + db.BlockSize
+	for i := 0; i < len(tokens); i += bs {
+		end := i + bs
 		if end > len(tokens) {
 			break // no partial blocks
 		}
@@ -151,7 +174,10 @@ func (db *chunkedTokenDatabase) chunkTokens(tokens []uint32) [][]uint32 {
 }
 
 // TokensToKVBlockKeys converts tokens into kv_block.Keys.
-func (db *chunkedTokenDatabase) TokensToKVBlockKeys(parentKey BlockHash, tokens []uint32, modelName string) []BlockHash {
+func (db *chunkedTokenDatabase) TokensToKVBlockKeys(
+	parentKey BlockHash, tokens []uint32, modelName string,
+	extraFeatures []*BlockExtraFeatures,
+) ([]BlockHash, error) {
 	var currentParentHash uint64
 	if parentKey != EmptyBlockHash {
 		currentParentHash = uint64(parentKey)
@@ -161,12 +187,19 @@ func (db *chunkedTokenDatabase) TokensToKVBlockKeys(parentKey BlockHash, tokens 
 
 	chunks := db.chunkTokens(tokens)
 	if len(chunks) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	ph := db.prefixHashes(currentParentHash, chunks)
+	if extraFeatures == nil {
+		extraFeatures = make([]*BlockExtraFeatures, len(chunks))
+	} else if len(extraFeatures) != len(chunks) {
+		return nil, fmt.Errorf("extraFeatures length %d does not match token chunk count %d (blockSize=%d, tokens=%d)",
+			len(extraFeatures), len(chunks), db.TokenProcessorConfig.BlockSize, len(tokens))
+	}
+
+	ph := db.prefixHashes(currentParentHash, chunks, extraFeatures)
 
 	return utils.SliceMap(ph, func(hashVal uint64) BlockHash {
 		return BlockHash(hashVal)
-	})
+	}), nil
 }

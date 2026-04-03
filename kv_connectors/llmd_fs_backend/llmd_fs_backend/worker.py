@@ -14,28 +14,29 @@
 
 import math
 import os
+import time
 
 import storage_offload
 import torch
-from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingHandler,
     TransferResult,
     TransferSpec,
+    TransferType,
 )
 
+from llmd_fs_backend import _logger as logger
 from llmd_fs_backend.file_mapper import FileMapper
 from llmd_fs_backend.mediums import SharedStorageLoadStoreSpec
-
-logger = init_logger(__name__)
 
 # ----------------------------------------------------------------------
 # Base Storage Offloading Handler
 # ----------------------------------------------------------------------
 DEFAULT_MAX_STAGING_MEMORY_GB = 150
 DEFAULT_THREADS_PER_GPU = 64
+DEFAULT_READ_PREFERRING_WORKERS_RATIO = 0.75
 
 
 class BaseStorageOffloadingHandler(OffloadingHandler):
@@ -49,6 +50,8 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
         gpu_blocks_per_file: int,
         file_mapper: FileMapper,
         engine: storage_offload.StorageOffloadEngine,
+        transfer_type: TransferType,
+        per_block_bytes: int,
     ):
         """
         Initialize a SingleStorageDirectionOffloadingHandler.
@@ -57,10 +60,26 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
             gpu_blocks_per_file: Number of GPU blocks grouped into a single file.
             file_mapper: The FileMapper mapping blocks to files.
             engine: the storage engine.
+            transfer_type: The type of transfer (src, dst) for metrics.
+            per_block_bytes: Size of a single GPU block in bytes.
         """
         self.file_mapper = file_mapper
         self.gpu_blocks_per_file = gpu_blocks_per_file
         self.engine = engine
+        self.transfer_type = transfer_type
+        self.per_block_bytes = per_block_bytes
+
+        # Maps job_id -> (submit_time, transfer_size_bytes).
+        # Shared across handlers via StorageOffloadingHandlers.
+        self._pending_jobs: dict[int, tuple[float, int]] = {}
+
+    def _record_job(self, job_id: int, num_blocks: int):
+        """Record job submission metadata for metrics."""
+        transfer_size = num_blocks * self.per_block_bytes
+        self._pending_jobs[job_id] = (
+            time.monotonic(),
+            transfer_size,
+        )
 
     def get_finished(self) -> list[TransferResult]:
         """
@@ -69,7 +88,40 @@ class BaseStorageOffloadingHandler(OffloadingHandler):
         Returns:
             List of completed transfer results.
         """
-        return self.engine.get_finished()
+        now = time.monotonic()
+        results = []
+        for job_id, success in self.engine.get_finished():
+            job_info = self._pending_jobs.pop(job_id, None)
+            if job_info is not None:
+                submit_time, transfer_size = job_info
+                transfer_time = now - submit_time
+                results.append(
+                    TransferResult(
+                        job_id=job_id,
+                        success=success,
+                        transfer_size=transfer_size,
+                        transfer_time=transfer_time,
+                        transfer_type=self.transfer_type,
+                    )
+                )
+                logger.debug(
+                    "Transfer finished: job_id=%d status=%s "
+                    "size=%.2f [MB] time=%.3f [s] throughput=%.2f [GB/s] type=%s",
+                    job_id,
+                    "OK" if success else "FAIL",
+                    transfer_size / (1 << 20),
+                    transfer_time,
+                    (transfer_size / transfer_time if transfer_time > 0 else 0)
+                    / (1 << 30),
+                    f"{self.transfer_type[0]}->{self.transfer_type[1]}",
+                )
+            else:
+                logger.warning(
+                    "Transfer finished with unknown job_id=%d, metrics unavailable",
+                    job_id,
+                )
+                results.append(TransferResult(job_id=job_id, success=success))
+        return results
 
     def wait(self, job_ids: set[int]):
         """
@@ -144,7 +196,13 @@ class GPUToStorageHandler(BaseStorageOffloadingHandler):
         )
 
         # Submit async PUT transfer
-        return self.engine.async_store_gpu_blocks(job_id, dst_files, per_file_block_ids)
+        success = self.engine.async_store_gpu_blocks(
+            job_id, dst_files, per_file_block_ids
+        )
+        if success:
+            total_blocks = sum(len(ids) for ids in per_file_block_ids)
+            self._record_job(job_id, total_blocks)
+        return success
 
 
 class StorageToGPUHandler(BaseStorageOffloadingHandler):
@@ -172,7 +230,13 @@ class StorageToGPUHandler(BaseStorageOffloadingHandler):
         )
 
         # Submit async GET transfer
-        return self.engine.async_load_gpu_blocks(job_id, src_files, per_file_block_ids)
+        success = self.engine.async_load_gpu_blocks(
+            job_id, src_files, per_file_block_ids
+        )
+        if success:
+            total_blocks = sum(len(ids) for ids in per_file_block_ids)
+            self._record_job(job_id, total_blocks)
+        return success
 
 
 class StorageOffloadingHandlers:
@@ -186,7 +250,9 @@ class StorageOffloadingHandlers:
         gpu_block_size: int,
         gpu_blocks_per_file: int,
         threads_per_gpu: int,
+        gds_mode: str,
         max_staging_memory_gb: int = DEFAULT_MAX_STAGING_MEMORY_GB,
+        read_preferring_ratio: float = DEFAULT_READ_PREFERRING_WORKERS_RATIO,
     ):
         threads_per_gpu = min(threads_per_gpu, int(os.cpu_count()))
         tensors, kernel_block_size = StorageOffloadingHandlers._get_tensors(
@@ -197,13 +263,35 @@ class StorageOffloadingHandlers:
 
         kernel_blocks_per_gpu_block = gpu_block_size // kernel_block_size
 
+        # Validate GDS mode
+        valid_gds_modes = [
+            "disabled",
+            "read_only",
+            "write_only",
+            "read_write",
+            "bb_read_only",
+            "bb_write_only",
+            "bb_read_write",
+        ]
+        if gds_mode not in valid_gds_modes:
+            logger.warning(
+                f"Invalid GDS mode '{gds_mode}', defaulting to 'disabled'. "
+                f"Valid options: {', '.join(valid_gds_modes)}"
+            )
+            gds_mode = "disabled"
+
         # Compute staging memory buffer size
         buffer_size_mb = self._compute_buffer_size_mb(
             tensors, gpu_blocks_per_file, kernel_blocks_per_gpu_block
         )
 
-        # Adjust threads_per_gpu if exceeding max_staging_memory_gb
-        if buffer_size_mb * threads_per_gpu > max_staging_memory_gb * 1024:
+        # Adjust threads_per_gpu if exceeding max_staging_memory_gb.
+        # Skip for full-GDS modes — CPU staging buffer is not used.
+        _gds_uses_no_staging = gds_mode in ("read_write", "bb_read_write")
+        if (
+            not _gds_uses_no_staging
+            and buffer_size_mb * threads_per_gpu > max_staging_memory_gb * 1024
+        ):
             threads_per_gpu = min(
                 threads_per_gpu, int(max_staging_memory_gb * 1024 / buffer_size_mb)
             )
@@ -213,32 +301,51 @@ class StorageOffloadingHandlers:
                 f"limit (buffer_size_mb={buffer_size_mb})."
             )
 
+        # Calculate number of read-preferring workers
+        read_preferring_workers = max(1, int(threads_per_gpu * read_preferring_ratio))
+
         # Initialize storage offload resources for async transfers
         self.engine = storage_offload.StorageOffloadEngine(
             io_threads=threads_per_gpu,
             gpu_blocks_per_file=gpu_blocks_per_file,
             tensors=tensors,
+            read_preferring_workers=read_preferring_workers,
+            gds_mode=gds_mode,
         )
 
+        # Compute per-GPU-block size in bytes for metrics across all layers.
+        kernel_block_bytes = sum(t.stride(0) * t.element_size() for t in tensors)
+        per_block_bytes = kernel_block_bytes * kernel_blocks_per_gpu_block
         logger.info(
             f"StorageOffloadingHandlers: "
-            f"threads_per_gpu={threads_per_gpu},"
+            f"threads_per_gpu={threads_per_gpu}, "
+            f"gds_mode={gds_mode}, "
             f"offloading block_size={gpu_blocks_per_file * gpu_block_size}, "
             f"staging_buffer_size_mb={buffer_size_mb}, "
             f"max_staging_memory_gb={max_staging_memory_gb}, "
+            f"read_preferring_workers={read_preferring_workers}, "
         )
+
+        # Shared across both handlers since the engine has a single completion queue.
+        pending_jobs: dict[int, tuple[float, int, TransferType]] = {}
 
         self.gpu_to_storage_handler = GPUToStorageHandler(
             engine=self.engine,
             file_mapper=file_mapper,
             gpu_blocks_per_file=gpu_blocks_per_file,
+            transfer_type=("GPU", "SHARED_STORAGE"),
+            per_block_bytes=per_block_bytes,
         )
+        self.gpu_to_storage_handler._pending_jobs = pending_jobs
 
         self.storage_to_gpu_handler = StorageToGPUHandler(
             engine=self.engine,
             file_mapper=file_mapper,
             gpu_blocks_per_file=gpu_blocks_per_file,
+            transfer_type=("SHARED_STORAGE", "GPU"),
+            per_block_bytes=per_block_bytes,
         )
+        self.storage_to_gpu_handler._pending_jobs = pending_jobs
 
     def _compute_buffer_size_mb(
         self,

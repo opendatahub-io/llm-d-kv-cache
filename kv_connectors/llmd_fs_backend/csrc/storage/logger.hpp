@@ -131,6 +131,41 @@ inline bool get_env_flag(const char* name, bool default_val) {
     __VA_OPT__(__fs_time_oss << " | "; [&]<typename... Args>(Args&&... args) { \
       ((__fs_time_oss << args), ...);                                          \
     }(__VA_ARGS__);)                                                           \
-    FS_LOG_DEBUG(__fs_time_oss.str());                                         \
+    FS_LOG_TRACE(__fs_time_oss.str());                                         \
     return __ret;                                                              \
+  })()
+
+// Timing macro with throughput calculation - measures execution time and
+// calculates throughput in GB/s Usage: TIME_EXPR_THROUGHPUT(label, expr,
+// size_bytes, additional_info...)
+#define TIME_EXPR_THROUGHPUT(label, expr, size_bytes, ...)                 \
+  ([&]() -> bool {                                                         \
+    if (FSLogger::level() > LogLevel::DEBUG) {                             \
+      return ((expr), true);                                               \
+    }                                                                      \
+    auto __t0 = std::chrono::high_resolution_clock::now();                 \
+    auto __ret = [&]() {                                                   \
+      if constexpr (std::is_void_v<decltype(expr)>) {                      \
+        (expr);                                                            \
+        return true;                                                       \
+      } else {                                                             \
+        return (expr);                                                     \
+      }                                                                    \
+    }();                                                                   \
+    auto __t1 = std::chrono::high_resolution_clock::now();                 \
+    double __ms =                                                          \
+        std::chrono::duration<double, std::milli>(__t1 - __t0).count();    \
+    double __seconds = __ms / 1000.0;                                      \
+    double __gb =                                                          \
+        static_cast<double>(size_bytes) / (1024.0 * 1024.0 * 1024.0);      \
+    double __throughput_gbps = (__seconds > 0) ? (__gb / __seconds) : 0.0; \
+    std::ostringstream __oss;                                              \
+    __oss << "[TIME] " << label << " took " << __ms << " ms"               \
+          << " | size: " << __gb << " GB"                                  \
+          << " | throughput: " << __throughput_gbps << " GB/s";            \
+    __VA_OPT__(__oss << " | "; [&]<typename... Args>(Args&&... args) {     \
+      ((__oss << args), ...);                                              \
+    }(__VA_ARGS__);)                                                       \
+    FS_LOG_DEBUG(__oss.str());                                             \
+    return __ret;                                                          \
   })()
