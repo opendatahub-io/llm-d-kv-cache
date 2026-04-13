@@ -7,7 +7,7 @@ PROD_VERSION ?= 0.0.0
 IMAGE_TAG_BASE ?= ghcr.io/llm-d/$(PROJECT_NAME)
 IMG = $(IMAGE_TAG_BASE):$(DEV_VERSION)
 NAMESPACE ?= hc4ai-operator
-VLLM_VERSION := 0.14.0
+VLLM_VERSION := 0.18.0
 
 TARGETOS ?= $(shell go env GOOS)
 TARGETARCH ?= $(shell go env GOARCH)
@@ -17,6 +17,8 @@ TOOLS_DIR := $(shell pwd)/hack/tools
 CONTAINER_TOOL := $(shell { command -v docker >/dev/null 2>&1 && echo docker; } || { command -v podman >/dev/null 2>&1 && echo podman; } || echo "")
 BUILDER := $(shell command -v buildah >/dev/null 2>&1 && echo buildah || echo $(CONTAINER_TOOL))
 UDS_TOKENIZER_IMAGE ?= llm-d-uds-tokenizer:e2e-test
+FS_BACKEND_NAME ?= llmd-fs-backend
+FS_BACKEND_DEV_IMG ?= $(IMAGE_TAG_BASE)/$(FS_BACKEND_NAME):$(DEV_VERSION)
 
 # go source files
 SRC = $(shell find . -type f -name '*.go')
@@ -213,7 +215,7 @@ unit-test-uds: check-go download-zmq ## Run unit tests without embedded tokenize
 .PHONY: unit-test-race
 unit-test-race: check-go download-zmq ## Run unit tests with Go race detector enabled
 	@printf "\033[33;1m==== Running unit tests with race detector ====\033[0m\n"
-	@go test -v -race ./pkg/...
+	@go test -v -race -count=1 ./pkg/...
 
 .PHONY: unit-test-embedded
 unit-test-embedded: check-go install-python-deps download-zmq ## Run unit tests with embedded tokenizers
@@ -231,7 +233,11 @@ e2e-test-embedded: check-go download-local-llama3 install-python-deps download-z
 .PHONY: image-build-uds
 image-build-uds: check-container-tool ## Build the UDS tokenizer container image
 	@printf "\033[33;1m==== Building UDS tokenizer image $(UDS_TOKENIZER_IMAGE) ====\033[0m\n"
-	$(CONTAINER_TOOL) build -t $(UDS_TOKENIZER_IMAGE) services/uds_tokenizer
+	$(CONTAINER_TOOL) build \
+		--platform $(TARGETOS)/$(TARGETARCH) \
+		--build-arg TARGETOS=$(TARGETOS) \
+		--build-arg TARGETARCH=$(TARGETARCH) \
+		-t $(UDS_TOKENIZER_IMAGE) services/uds_tokenizer
 
 .PHONY: e2e-test-uds
 e2e-test-uds: check-go download-zmq image-build-uds ## Run UDS tokenizer e2e tests (requires Docker or Podman)
@@ -698,3 +704,18 @@ run-example: ## Run the example with UDS tokenizer in Docker (e.g., make run-exa
 	@$(MAKE) --no-print-directory run-example-only; status=$$?; \
 		$(MAKE) --no-print-directory stop-tokenizer; \
 		exit $$status
+
+.PHONY: image-fs-backend-build
+image-fs-backend-build: check-container-tool load-version-json ## Build the development container for the llmd_fs_backend connector
+	@printf "\033[33;1m==== Building development container $(FS_BACKEND_DEV_IMG) ====\033[0m\n"
+	$(CONTAINER_TOOL) build \
+		--platform $(TARGETOS)/$(TARGETARCH) \
+		--build-arg TARGETOS=$(TARGETOS) \
+		--build-arg TARGETARCH=$(TARGETARCH) \
+		-f kv_connectors/llmd_fs_backend/Dockerfile.dev \
+		-t $(FS_BACKEND_DEV_IMG) .
+
+.PHONY: image-fs-backend-push
+image-fs-backend-push: check-container-tool load-version-json ## Push the development container for the llmd_fs_backend connector
+	@printf "\033[33;1m==== Pushing development container $(FS_BACKEND_DEV_IMG) ====\033[0m\n"
+	$(CONTAINER_TOOL) push $(FS_BACKEND_DEV_IMG)
