@@ -14,7 +14,7 @@ The indexer is built from several modules with separated concerns:
 |:---|:---|:---|
 | `kvcache.Indexer` | Orchestrator — coordinates block-key computation, index lookup, and scoring. | — |
 | `kvblock.TokenProcessor` | Converts a token sequence into a deterministic list of block keys. Reproduces each engine's chained FNV-64a over CBOR content-addressing scheme. | — |
-| `tokenization.Pool` | Worker pool for rendering and tokenizing prompts. Sources tokenizers from a UDS sidecar, from local files, or from HuggingFace Hub. | — |
+| `tokenization.Pool` | Deprecated in-process worker pool backing the prompt-string APIs. New integrations tokenize externally and call `ScoreTokens` directly. | — |
 | `kvblock.Scorer` | Computes per-pod scores from block keys and lookup results. | Longest consecutive prefix match, weighted by device tier. |
 | `kvblock.Index` | The block index itself. Pluggable interface storing `requestKey → []PodEntry` plus the auxiliary `engineKey → requestKey` map. | Two-level in-memory LRU. |
 | `kvevents.Pool` | Sharded worker pool that consumes ZMQ messages, orders them per-pod (FNV-1a on pod ID), and applies them to the index. | — |
@@ -26,7 +26,7 @@ flowchart LR
         direction TB
         Indexer["kvcache.Indexer<br/>(orchestrator)"]
         TP["kvblock.TokenProcessor<br/>(tokens → block keys)"]
-        Tokzr["tokenization.Pool<br/>(UDS / embedded)"]
+        Tokzr["tokenization.Pool<br/>(deprecated)"]
         BScorer["kvblock.Scorer<br/>(longest-prefix match)"]
         Index["kvblock.Index<br/>(block key → pods)"]
         Pool["kvevents.Pool<br/>(sharded ZMQ workers)"]
@@ -275,16 +275,20 @@ The library exposes the primitive; the policy (when to insert, what TTL) is deci
 
 ### Tokenization Subsystem
 
-Efficient tokenization matters because the Read Path computes request keys synchronously per request. The system uses a worker pool with a composite tokenizer:
+> [!WARNING]
+> **Internal tokenization is deprecated.** New integrations should tokenize
+> externally — in the host process or a sidecar — and feed token IDs into
+> `Indexer.ScoreTokens` (or `Indexer.ComputeBlockKeysFromTokens`) directly.
+> The prompt-string entry points (`Indexer.GetPodScores`, `Indexer.ComputeBlockKeys`)
+> and the `tokenization.Pool` they depend on are retained for
+> backwards-compatibility and will be removed in a future release.
+>
+> `kvcache.NewDefaultConfig()` no longer pre-populates `TokenizersPoolConfig`;
+> callers that still rely on the deprecated path must set it explicitly.
 
-- **`tokenization.Pool`** — supports both synchronous (for scoring requests — complete results required) and asynchronous (fire-and-forget) modes.
-- **Tokenizer backends**:
-  - **`CachedLocalTokenizer`** — loads tokenizers from local files. Useful for air-gapped environments, custom tokenizers, or pre-loaded models. Supports manual mapping, auto-discovery of HuggingFace cache layouts (`models--org--model/snapshots/{hash}/tokenizer.json`), and custom directory structures.
-  - **`CachedHFTokenizer`** — downloads and caches tokenizers from HuggingFace. Wraps HF's Rust tokenizers and maintains an LRU cache of active instances.
-  - **`CompositeTokenizer`** (default) — tries backends in order, falling back from local to HuggingFace. Best of both worlds: fast local access when available, remote fetching otherwise.
-- **Caching** — all tokenizer backends maintain an LRU of loaded tokenizer instances to avoid repeated disk loads.
+Tokenization happens **outside the indexer**. The host (e.g. llm-d's EPP) renders prompts and feeds token IDs to `Indexer.ScoreTokens`. The indexer is agnostic to the tokenizer source as long as the resulting token IDs match what the engines emit in their KV-events.
 
-The library can also be driven by an **external tokenizer sidecar** over a Unix domain socket, in which case the internal `tokenization.Pool` is not used. This is the recommended setup for production deployments (isolates tokenizer downloads and Python dependencies from the host process).
+For backwards-compatibility, the indexer still ships a deprecated in-process `tokenization.Pool` backing the prompt-string APIs (`GetPodScores`, `ComputeBlockKeys`). The pool and those APIs will be removed once consumers migrate to `ScoreTokens`.
 
 -----
 
@@ -292,7 +296,6 @@ The library can also be driven by an **external tokenizer sidecar** over a Unix 
 
 The indexer relies on several external libraries:
 
-- **Tokenization** — HuggingFace Rust tokenizers via Go bindings (embedded path), or an external tokenizer sidecar over UDS (recommended for production).
 - **[go-zeromq/zmq4](https://github.com/go-zeromq/zmq4)** — pure-Go ZeroMQ implementation used by the event processing pool. Does not require `libzmq` on the host.
 
 -----
