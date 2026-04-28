@@ -58,9 +58,6 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
                 "max_staging_memory_gb", DEFAULT_MAX_STAGING_MEMORY_GB
             )
         )  # Max staging CPU buffer in GB
-        # GDS mode: disabled, read_only, write_only, read_write,
-        # bb_read_only, bb_write_only, bb_read_write
-        self.gds_mode = str(self.extra_config.get("gds_mode", "disabled"))
 
         self.offloaded_block_size = int(
             self.extra_config.get("block_size", DEFAULT_STORAGE_BLOCK_SIZE)
@@ -109,7 +106,18 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
     def get_manager(self) -> OffloadingManager:
         assert self.vllm_config.parallel_config.rank == 0, "Scheduler rank should be 0"
         if not self._manager:
-            self._manager = SharedStorageOffloadingManager(file_mapper=self.file_mapper)
+            backend = self.extra_config.get("backend", "POSIX")
+            if backend == "OBJ":
+                from llmd_nixl.manager import NixlStorageOffloadingManager
+
+                self._manager = NixlStorageOffloadingManager(
+                    file_mapper=self.file_mapper,
+                    extra_config=self.extra_config,
+                )
+            else:
+                self._manager = SharedStorageOffloadingManager(
+                    file_mapper=self.file_mapper,
+                )
         return self._manager
 
     def get_handlers(
@@ -117,15 +125,23 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
         kv_caches: CanonicalKVCaches,
     ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
         if not self._handlers:
-            self._handlers = StorageOffloadingHandlers(
+            backend = self.extra_config.get("backend", "POSIX")
+            if backend == "OBJ":
+                from llmd_nixl.worker import NixlStorageOffloadingHandlers
+
+                handlers_cls = NixlStorageOffloadingHandlers
+            else:
+                handlers_cls = StorageOffloadingHandlers
+            self._handlers = handlers_cls(
                 file_mapper=self.file_mapper,
                 gpu_blocks_per_file=self.gpu_blocks_per_file,
                 gpu_block_size=self.gpu_block_size[0],
                 kv_caches=kv_caches,
                 threads_per_gpu=self.threads_per_gpu,
                 max_staging_memory_gb=self.max_staging_memory_gb,
-                gds_mode=self.gds_mode,
+                read_preferring_ratio=self.read_preferring_ratio,
                 max_write_queued_seconds=self.max_write_queued_seconds,
+                extra_config=self.extra_config,
             )
 
         assert self._handlers is not None

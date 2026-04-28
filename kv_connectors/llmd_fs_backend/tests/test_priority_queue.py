@@ -83,7 +83,7 @@ def create_test_handler(
         gpu_blocks_per_file=config["gpu_blocks_per_file"],
         gpu_block_size=config["gpu_block_size"],
         threads_per_gpu=threads_per_gpu,
-        gds_mode="disabled",
+        extra_config={"gds_mode": "disabled"},
     )
     if max_write_queued_seconds is not None:
         handler_kwargs["max_write_queued_seconds"] = max_write_queued_seconds
