@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llmd_fs_connector"
-version = "0.18"
+version = "0.19"
 description = "Standalone llm-d fs storage connector"
 readme = "README.md"
 authors = [
@@ -21,17 +21,23 @@ maintainers = [
 requires-python = ">=3.12"
 dependencies = [
     "torch==2.10.0",
+    "nixl",
 ]
 
 [tool.setuptools]
-packages = ["llmd_fs_backend"]
+packages = ["llmd_fs_backend", "llmd_nixl"]
 
 [tool.setuptools.package-data]
 llmd_fs_backend = ["*.so"]
 
+# Auto-load the OffloadPromMetrics monkey-patch during vLLM startup.
+# TODO: remove once vLLM disambiguates kv_offload metric names natively.
+[project.entry-points."vllm.general_plugins"]
+llmd_fs_metric_patch = "llmd_fs_backend.metrics:install_offload_metric_suffix_patch"
+
 [project.optional-dependencies]
 dev = [
-    "vllm==0.18.1",
+    "vllm==0.19.1",
     "pytest",
     "black",
     "ruff",
