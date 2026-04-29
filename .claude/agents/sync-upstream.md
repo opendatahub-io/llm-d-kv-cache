@@ -156,8 +156,9 @@ git -C "${REPO_PATH}" diff --stat opendatahub/${ODH_BRANCH}..HEAD
 If the user chooses to open the PR:
 
 ```bash
-# 12. Get fork owner using gh (more reliable than regex)
-FORK_OWNER=$(gh repo view --json owner -q .owner.login)
+# 12. Get fork owner from origin remote URL
+# NOTE: Do not use `gh repo view --json owner` — on forks it resolves to the parent repo owner.
+FORK_OWNER=$(git -C "${REPO_PATH}" remote get-url origin | sed -E 's|.*[:/]([^/]+)/[^/]+(.git)?$|\1|')
 
 # 13. Open PR to opendatahub-io
 gh pr create \
