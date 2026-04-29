@@ -92,3 +92,6 @@ services/uds_tokenizer/tokenizers
 services/uds_tokenizer/.venv
 
 **/vllm_source
+
+# Claude config
+.claude/settings.local.json
