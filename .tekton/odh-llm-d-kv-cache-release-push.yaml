@@ -8,7 +8,7 @@ metadata:
     pipelinesascode.tekton.dev/cancel-in-progress: "false"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
     pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch
-      == "release-v0.8.0" && ( "services/uds_tokenizer/***".pathChanged() || ".tekton/llm-d-kv-cache-release-push.yaml".pathChanged()
+      == "release-v0.8.0" && ( "services/uds_tokenizer/***".pathChanged() || ".tekton/odh-llm-d-kv-cache-release-push.yaml".pathChanged()
       )
   creationTimestamp: null
   labels:
