@@ -8,6 +8,18 @@ Sync code from the upstream llm-d org to a user's fork and open a PR to opendata
 ODH_BRANCH="main"  # The target branch on opendatahub-io. Change this if the branch name changes.
 ```
 
+## ODH-Protected Files
+
+The following file patterns are **ODH-only** and must always keep the opendatahub version during a sync, never the upstream version. If upstream modifies or deletes these files, discard upstream's changes and preserve the opendatahub version.
+
+```bash
+ODH_PROTECTED_PATTERNS=(
+  "OWNERS*"
+  "Dockerfile*konflux"
+  ".tekton/*.yaml"
+)
+```
+
 ## Input
 
 Ask the user: **"Sync to upstream/main HEAD or a specific commit SHA?"**
@@ -97,14 +109,25 @@ git -C "${REPO_PATH}" checkout -b "${BRANCH}" opendatahub/${ODH_BRANCH}
 git -C "${REPO_PATH}" merge --no-ff "${FULL_SHA}" --no-edit \
   -m "Sync upstream llm-d/llm-d-kv-cache ${SHORT_SHA}"
 
-# 8. Verify merge succeeded
-if [ $? -eq 0 ]; then
-  echo "✓ Merge completed successfully"
-  git -C "${REPO_PATH}" log -1 --stat
-else
-  echo "✗ Merge failed"
-  exit 1
+# 8. Restore ODH-protected files
+# After the merge (whether clean or after conflict resolution), restore
+# ODH-protected files to their opendatahub/${ODH_BRANCH} version.
+# This ensures OWNERS*, Dockerfile*konflux, and .tekton/*.yaml always
+# reflect the opendatahub version, not upstream.
+for pattern in "${ODH_PROTECTED_PATTERNS[@]}"; do
+  for file in $(git -C "${REPO_PATH}" diff --name-only opendatahub/${ODH_BRANCH} HEAD -- "${pattern}" 2>/dev/null); do
+    echo "Restoring ODH-protected file: ${file}"
+    git -C "${REPO_PATH}" checkout opendatahub/${ODH_BRANCH} -- "${file}"
+  done
+done
+# If any protected files were restored, amend the merge commit
+if ! git -C "${REPO_PATH}" diff --cached --quiet; then
+  git -C "${REPO_PATH}" commit --amend --no-edit
 fi
+
+# 9. Verify merge succeeded
+echo "✓ Merge completed successfully"
+git -C "${REPO_PATH}" log -1 --stat
 ```
 
 ## Conflict Resolution
@@ -112,10 +135,14 @@ fi
 If step 7 produces merge conflicts:
 
 1. List conflicted files with `git -C "${REPO_PATH}" diff --name-only --diff-filter=U`
-2. Show the conflicts to the user
-3. Attempt to resolve trivial conflicts automatically (whitespace, import order)
-4. For non-trivial conflicts, show the diff and ask the user how to resolve each file
-5. After all conflicts are resolved:
+2. **Auto-resolve ODH-protected files**: For any conflicted file matching `ODH_PROTECTED_PATTERNS` (`OWNERS*`, `Dockerfile*konflux`, `.tekton/*.yaml`), immediately resolve by keeping the opendatahub version:
+   ```bash
+   git -C "${REPO_PATH}" checkout opendatahub/${ODH_BRANCH} -- "${file}"
+   ```
+3. Show remaining conflicts to the user
+4. Attempt to resolve trivial conflicts automatically (whitespace, import order)
+5. For non-trivial conflicts, show the diff and ask the user how to resolve each file
+6. After all conflicts are resolved:
    ```bash
    git -C "${REPO_PATH}" add -u
    git -C "${REPO_PATH}" commit --no-edit
