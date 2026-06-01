@@ -59,11 +59,12 @@ def create_test_handler(
     file_mapper = FileMapper(
         root_dir=TMP_DIR,
         model_name=model_name,
-        gpu_block_size=config["gpu_block_size"],
+        hash_block_size=config["gpu_block_size"],
         gpu_blocks_per_file=config["gpu_blocks_per_file"],
         tp_size=1,
         pp_size=1,
         pcp_size=1,
+        dcp_size=1,
         rank=0,
         dtype=config["dtype"],
     )
@@ -175,9 +176,7 @@ def test_priority_completion_order(default_vllm_config):
             range(file_idx * blocks_per_file, (file_idx + 1) * blocks_per_file)
         )
         read_gpu = make_gpu_specs(block_ids)
-        read_storage = SharedStorageLoadStoreSpec(
-            [read_put_storage.block_hashes[file_idx]]
-        )
+        read_storage = SharedStorageLoadStoreSpec([read_put_storage.keys[file_idx]])
 
         job_id = 100 + i
         get.transfer_async(job_id=job_id, spec=(read_storage, read_gpu))
@@ -324,9 +323,7 @@ def test_read_latency_percentiles(default_vllm_config):
             range(file_idx * blocks_per_file, (file_idx + 1) * blocks_per_file)
         )
         read_gpu = make_gpu_specs(block_ids)
-        read_storage = SharedStorageLoadStoreSpec(
-            [read_put_storage.block_hashes[file_idx]]
-        )
+        read_storage = SharedStorageLoadStoreSpec([read_put_storage.keys[file_idx]])
 
         start = time.time()
         get.transfer_async(job_id=1000 + i, spec=(read_storage, read_gpu))
@@ -472,9 +469,7 @@ def test_write_starvation_prevention(default_vllm_config):
             range(file_idx * blocks_per_file, (file_idx + 1) * blocks_per_file)
         )
         read_gpu = make_gpu_specs(block_ids)
-        read_storage = SharedStorageLoadStoreSpec(
-            [read_put_storage.block_hashes[file_idx]]
-        )
+        read_storage = SharedStorageLoadStoreSpec([read_put_storage.keys[file_idx]])
 
         get.transfer_async(job_id=read_job_counter, spec=(read_storage, read_gpu))
         reads_submitted += 1

@@ -100,11 +100,11 @@ class StorageOffloadEngine(ABC):
         """Return params dict for agent.create_backend()."""
 
     @abstractmethod
-    def _get_staging_and_copy(self, block_ids: list) -> tuple:
+    def _store_gpu_blocks_to_staging(self, block_ids: list) -> tuple:
         """Return (tensors, stagings) ready for a WRITE transfer."""
 
     @abstractmethod
-    def _get_staging(self, block_ids: list) -> tuple:
+    def _reserve_staging_for_load(self, block_ids: list) -> tuple:
         """Return (tensors, stagings) ready for a READ transfer."""
 
     @abstractmethod
@@ -116,16 +116,15 @@ class StorageOffloadEngine(ABC):
         """Open files; return fd_list (ints for file backends, strings for OBJ)."""
 
     @abstractmethod
-    def _build_nixl_file_entry(
-        self, fd_list: list, file_idx: int, intra_offset: int
-    ) -> tuple:
-        """Return one NIXL file descriptor tuple for a block.
+    def _build_nixl_file_entries(
+        self, fd_list: list, file_idx: int, block_list: list
+    ) -> list[tuple]:
+        """Return NIXL file descriptor tuples for one file.
 
         Args:
-            fd_list:      file descriptors / S3 keys, one per file.
-            file_idx:     index into fd_list identifying the file.
-            intra_offset: position of this block within the file
-                          (always 0 for OBJ since block size == GPU block size).
+            fd_list:    file descriptors / S3 keys, one per file.
+            file_idx:   index into fd_list identifying the file.
+            block_list: block ids assigned to this file.
         """
 
     @abstractmethod
@@ -133,7 +132,7 @@ class StorageOffloadEngine(ABC):
         """Close descriptors opened by _open_files."""
 
     @abstractmethod
-    def _complete_read(self, stagings: list, block_ids: list) -> None:
+    def _load_staging_to_gpu_blocks(self, stagings: list, block_ids: list) -> None:
         """Copy completed READ data from stagings to GPU (no-op for GDS)."""
 
     @abstractmethod
@@ -163,15 +162,13 @@ class StorageOffloadEngine(ABC):
         blocks_data = self._get_blocks_data(tensors, block_ids)
         assert blocks_data
 
-        # Build one NIXL file entry per block, grouped by file.
-        # file_idx indexes fd_list; intra_offset is the block's position
-        # within that file.
+        # Build one NIXL file entry per file; OBJ packs all blocks into one
+        # contiguous S3 object, so each file produces exactly one descriptor.
         nixl_files = []
         for file_idx, block_list in enumerate(block_ids):
-            for intra_offset, _ in enumerate(block_list):
-                nixl_files.append(
-                    self._build_nixl_file_entry(fd_list, file_idx, intra_offset)
-                )
+            nixl_files.extend(
+                self._build_nixl_file_entries(fd_list, file_idx, block_list)
+            )
 
         assert len(blocks_data) == len(nixl_files)
         xfer_desc = self.agent.get_xfer_descs(blocks_data, self.nixl_source)
@@ -218,7 +215,10 @@ class StorageOffloadEngine(ABC):
     ) -> bool:
         """Store gpu kv cache blocks into storage (obj, posix, gds, whatever)"""
         self.logger.debug("async_store_gpu_blocks in_flight=%d", len(self._transfers))
-        tensors, stagings = self._get_staging_and_copy(block_ids)
+        tensors, stagings = self._store_gpu_blocks_to_staging(block_ids)
+        assert tensors is not None, (
+            "staging pool should never be empty after auto-extend"
+        )
         return self._submit_transfer(
             job_id, tensors, stagings, files, block_ids, "WRITE"
         )
@@ -228,7 +228,10 @@ class StorageOffloadEngine(ABC):
     ) -> bool:
         """Load kv cache blocks from storage into gpu"""
         self.logger.debug("async_load_gpu_blocks in_flight=%d", len(self._transfers))
-        tensors, stagings = self._get_staging(block_ids)
+        tensors, stagings = self._reserve_staging_for_load(block_ids)
+        assert tensors is not None, (
+            "staging pool should never be empty after auto-extend"
+        )
         return self._submit_transfer(
             job_id, tensors, stagings, files, block_ids, "READ"
         )

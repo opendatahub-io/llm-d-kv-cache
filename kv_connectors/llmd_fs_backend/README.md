@@ -20,7 +20,7 @@ For simple setups, see the **Storage Cleanup** section.
 
 ## System Requirements
 
-- vLLM version 0.19.x. Previous vLLM lines are supported via matching wheel versions on the pip index — vLLM 0.X.x uses `llmd-fs-connector==0.X` (see [Installation](#installation)).
+- vLLM version 0.21.x. Previous vLLM lines are supported via matching wheel versions on the pip index — vLLM 0.X.x uses `llmd-fs-connector==0.X` (see [Installation](#installation)).
 
 ## Installation
 
@@ -31,14 +31,14 @@ The connector is published as a PEP 503 simple index hosted on GitHub Pages. The
 CUDA 12 (default):
 
 ```bash
-pip install 'llmd-fs-connector==0.19' \
+pip install 'llmd-fs-connector==0.21' \
   --extra-index-url https://llm-d.github.io/llm-d-kv-cache/simple/
 ```
 
 CUDA 13:
 
 ```bash
-pip install 'llmd-fs-connector==0.19' \
+pip install 'llmd-fs-connector==0.21' \
   --extra-index-url https://llm-d.github.io/llm-d-kv-cache/simple/cu130/
 ```
 
@@ -51,13 +51,15 @@ pip install 'llmd-fs-connector==0.18' \
 
 Or download a wheel manually from the release assets at <https://github.com/llm-d/llm-d-kv-cache/releases>.
 
+A complete list of available releases is published at <https://llm-d.ai/llm-d-kv-cache/simple/llmd-fs-connector/>.
+
 ### 2. Build from source (compile yourself)
 
-Requires CUDA toolkit and system dependencies.
+Requires CUDA toolkit and system dependencies. 
 
 ```bash
 apt-get update && apt-get install -y libnuma-dev git cuda-toolkit-12-9
-pip install git+https://github.com/llm-d-kv-cache-manager.git#subdirectory=kv_connectors/llmd_fs_backend
+pip install --no-build-isolation git+https://github.com/llm-d-kv-cache.git#subdirectory=kv_connectors/llmd_fs_backend
 ```
 
 ### 3. Developer mode (clone and editable install)
@@ -66,9 +68,9 @@ Clone the source and install in editable mode:
 
 ```bash
 apt-get update && apt-get install -y libnuma-dev git cuda-toolkit-12-9
-git clone https://github.com/llm-d-kv-cache-manager.git
-cd llm-d-kv-cache-manager/kv_connectors/llmd_fs_backend
-pip install -e .
+git clone https://github.com/llm-d-kv-cache.git
+cd llm-d-kv-cache/kv_connectors/llmd_fs_backend
+pip install --no-build-isolation -e .
 ```
 
 Alternatively, you can build and push a development container image directly using the provided `Dockerfile.dev`. This image includes all dependencies and performs an editable installation:
@@ -152,6 +154,37 @@ Then apply the full vLLM deployment (including the offloading connector with a f
 kubectl apply -f ./docs/deployment/vllm-storage.yaml
 ```
 
+## On-disk Layout
+
+KV blocks are organized under `shared_storage_path` by a config fingerprint, so runs with identical config share the same folder and reuse the same cache:
+
+```
+<shared_storage_path>/<safe_model_name>_<sha256-12hex>/
+    config.json                                       # shared across ranks
+<shared_storage_path>/<safe_model_name>_<sha256-12hex>_r<rank>/
+    <hhh>/<hh>_g<group>/<block-hash>.bin              # per-rank KV blocks
+```
+
+The hash fingerprints every field that affects the on-disk format (model, parallel sizes, dtype, block sizes, kv_cache_groups, inference_engine). `rank` lives outside the hash: the base folder (with `config.json`) is shared across ranks, while each rank's KV blocks land in a sibling `_r<rank>` folder.
+
+`config.json` is written by the first init and records the fields, for example:
+
+```json
+{
+  "dtype": "torch.bfloat16",
+  "hash_block_size": 16,
+  "gpu_blocks_per_file": 256,
+  "inference_engine": "vllm",
+  "kv_cache_groups": [
+    {
+      "block_size": 16,
+      "layer_names": ["model.layers.0.self_attn.attn", "..."]
+    }
+  ],
+  "model_name": "meta-llama/Meta-Llama-3.1-8B",
+  "dcp_size": 1, "pcp_size": 1, "pp_size": 1, "tp_size": 1
+}
+```
 ## Metrics
 
 The fs backend populates vLLM's built-in offloading metrics. When Prometheus metrics are enabled in vLLM, the following metrics are automatically exported:
