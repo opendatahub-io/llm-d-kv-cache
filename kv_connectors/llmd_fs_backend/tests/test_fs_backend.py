@@ -24,11 +24,13 @@ from collections.abc import Iterable
 import pytest
 import torch
 from vllm.v1.core.kv_cache_utils import BlockHash
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
-from vllm.v1.kv_offload.spec import (
+from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    GPULoadStoreSpec,
+    OffloadKey,
+    make_offload_key,
 )
 
 from llmd_fs_backend.file_mapper import FileMapper
@@ -110,35 +112,42 @@ def get_prefix_hash(token_ids: Iterable[int]) -> BlockHash:
 
 def make_gpu_specs(block_ids: list[int]) -> GPULoadStoreSpec:
     """Create GPULoadStoreSpec objects for the given block IDs (single KV group)."""
-    return GPULoadStoreSpec(block_ids, group_sizes=[len(block_ids)])
+    # vllm >= 0.21 requires group_sizes and block_indices: one entry per group.
+    # Our backend doesn't consume either, so single-group defaults are fine.
+    return GPULoadStoreSpec(block_ids, group_sizes=[len(block_ids)], block_indices=[0])
+
+
+def get_offload_key(token_ids: Iterable[int], group_idx: int = 0) -> OffloadKey:
+    """Generate an OffloadKey from token IDs and group index."""
+    return make_offload_key(get_prefix_hash(token_ids), group_idx)
 
 
 def make_storage_specs(
     num_files: int,
     start_offset: int = 0,
-) -> tuple[SharedStorageLoadStoreSpec, list[BlockHash]]:
-    """Create SharedStorageLoadStoreSpec objects and their hashes for
+) -> tuple[SharedStorageLoadStoreSpec, list[OffloadKey]]:
+    """Create SharedStorageLoadStoreSpec objects and their keys for
     a given number of files.
 
     Args:
-        num_files: Number of file hashes to generate
+        num_files: Number of file keys to generate
         start_offset: Starting index for hash generation (prevents conflicts)
     """
     ranges = [
         (100 + (start_offset + i) * 100, 117 + (start_offset + i) * 100)
         for i in range(num_files)
     ]
-    hashes = [get_prefix_hash(range(a, b)) for (a, b) in ranges]
-    return SharedStorageLoadStoreSpec(hashes), hashes
+    keys = [get_offload_key(range(a, b)) for (a, b) in ranges]
+    return SharedStorageLoadStoreSpec(keys), keys
 
 
 def cleanup_files(
     file_mapper: FileMapper,
-    block_hashes: list[BlockHash],
+    keys: list[OffloadKey],
 ) -> None:
-    """Remove existing files for the provided block hashes."""
-    for h in block_hashes:
-        path = file_mapper.get_file_name(h)
+    """Remove existing files for the provided offload keys."""
+    for key in keys:
+        path = file_mapper.get_file_name(key)
         if os.path.exists(path):
             os.remove(path)
 
@@ -259,6 +268,10 @@ def roundtrip_once(
     gpu_blocks_per_file: int,
     threads_per_gpu: int,
     extra_config: dict | None = None,
+    handlers_cls=StorageOffloadingHandlers,
+    wait_timeout: float = 2.0,
+    cleanup: bool = True,
+    file_exists_fn=None,
 ):
     original = create_dummy_kv_tensors(
         num_layers, num_blocks, block_size, num_heads, head_size, dtype
@@ -267,11 +280,11 @@ def roundtrip_once(
 
     put_gpu_specs = make_gpu_specs(write_block_ids)
     put_num_files = math.ceil(len(write_block_ids) / gpu_blocks_per_file)
-    put_storage_specs, block_hashes = make_storage_specs(put_num_files)
-    cleanup_files(file_mapper, block_hashes)
+    put_storage_specs, keys = make_storage_specs(put_num_files)
+    cleanup_files(file_mapper, keys)
 
     # PUT phase
-    kv_caches_original_handler = StorageOffloadingHandlers(
+    kv_caches_original_handler = handlers_cls(
         file_mapper=file_mapper,
         kv_caches=make_canonical_kv_caches(original),
         gpu_blocks_per_file=gpu_blocks_per_file,
@@ -282,7 +295,7 @@ def roundtrip_once(
     put_handler = kv_caches_original_handler.gpu_to_storage_handler
     start_put = time.time()
     put_handler.transfer_async(job_id=1, spec=(put_gpu_specs, put_storage_specs))
-    put_result = wait_for(put_handler, job_id=1, timeout=2.0)
+    put_result = wait_for(put_handler, job_id=1, timeout=wait_timeout)
     assert put_result.success, "PUT failed"
     dur_put = time.time() - start_put
 
@@ -290,14 +303,13 @@ def roundtrip_once(
     assert put_result.transfer_size is not None and put_result.transfer_size > 0
     assert put_result.transfer_time is not None and put_result.transfer_time > 0
     assert put_result.transfer_type == ("GPU", "SHARED_STORAGE")
-    for h in block_hashes:
-        file_path = file_mapper.get_file_name(h)
-        assert wait_for_file(file_path, timeout=2.0), (
-            f"missing file after PUT: {file_path}"
-        )
+    check_exists = file_exists_fn or (lambda p: wait_for_file(p, timeout=2.0))
+    for key in keys:
+        file_path = file_mapper.get_file_name(key)
+        assert check_exists(file_path), f"missing file after PUT: {file_path}"
 
     # GET phase
-    kv_caches_restored_handler = StorageOffloadingHandlers(
+    kv_caches_restored_handler = handlers_cls(
         file_mapper=file_mapper,
         kv_caches=make_canonical_kv_caches(restored),
         gpu_blocks_per_file=gpu_blocks_per_file,
@@ -309,13 +321,11 @@ def roundtrip_once(
 
     get_gpu_specs = make_gpu_specs(read_block_ids)
     get_num_files = math.ceil(len(read_block_ids) / gpu_blocks_per_file)
-    start_index = len(put_storage_specs.block_hashes) - get_num_files
-    get_storage_spec = SharedStorageLoadStoreSpec(
-        put_storage_specs.block_hashes[start_index:]
-    )
+    start_index = len(put_storage_specs.keys) - get_num_files
+    get_storage_spec = SharedStorageLoadStoreSpec(put_storage_specs.keys[start_index:])
     start_get = time.time()
     get_handler.transfer_async(job_id=2, spec=(get_storage_spec, get_gpu_specs))
-    get_result = wait_for(get_handler, job_id=2, timeout=2.0)
+    get_result = wait_for(get_handler, job_id=2, timeout=wait_timeout)
     dur_get = time.time() - start_get
     assert get_result.success, "GET failed"
 
@@ -332,16 +342,20 @@ def roundtrip_once(
     read_total_mb = total_block_size_mb(
         num_layers, num_heads, block_size, head_size, dtype, len(read_block_ids)
     )
-    file_size_mb = os.path.getsize(file_mapper.get_file_name(block_hashes[0])) / (
-        1024 * 1024
-    )
-    num_files = len(block_hashes)
+    num_files = len(keys)
+    try:
+        file_size_mb = os.path.getsize(file_mapper.get_file_name(keys[0])) / (
+            1024 * 1024
+        )
+        size_info = f" file_size={file_size_mb:.2f}MB"
+    except OSError:
+        size_info = ""
     print(
         f"[INFO] group={gpu_blocks_per_file} write blocks len: "
         f"{len(write_block_ids)} read blocks len: {len(read_block_ids)} "
         f"PUT {dur_put:.4f}s ({throughput_gbps(write_total_mb, dur_put):.2f} GB/s), "
         f"GET {dur_get:.4f}s ({throughput_gbps(read_total_mb, dur_get):.2f} GB/s), "
-        f"files={num_files}, sizes(MB)={file_size_mb:.2f} "
+        f"files={num_files}{size_info}"
     )
 
 
@@ -387,11 +401,12 @@ def test_fs_backend_roundtrip_param(
     file_mapper = FileMapper(
         root_dir=root_dir,
         model_name=model_name,
-        gpu_block_size=gpu_block_size,
+        hash_block_size=gpu_block_size,
         gpu_blocks_per_file=gpu_blocks_per_file,
         tp_size=tp_size,
         pp_size=tp_size,
         pcp_size=tp_size,
+        dcp_size=1,
         rank=tp_rank,
         dtype=str(dtype),
     )
