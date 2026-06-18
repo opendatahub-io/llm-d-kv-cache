@@ -392,6 +392,16 @@ func TestRealignExtraFeatures(t *testing.T) {
 		assert.Len(t, result[1].MMHashes, 1)
 		assert.Equal(t, "c", result[1].MMHashes[0].Hash)
 	})
+
+	t.Run("zero canonical blocks (engine BS < canonical BS)", func(t *testing.T) {
+		// 1 engine block → 0 canonical blocks: tokens < canonical block size.
+		// realignExtraFeatures returns an empty slice instead of panicking.
+		features := []*kvblock.BlockExtraFeatures{
+			{MMHashes: []kvblock.MMHash{{Hash: "img0"}}},
+		}
+		result := realignExtraFeatures(features, 0)
+		assert.Empty(t, result)
+	})
 }
 
 // TestCanonicalWritePath_ExtraKeysOneToMany verifies that events with ExtraKeys
@@ -653,6 +663,113 @@ func TestBlockStoredEvent_EvictionOrderGPUThenCPU(t *testing.T) {
 	assert.Error(t, err, "engine→request mapping should be removed after full eviction")
 }
 
+func TestHMAGroupMetadataAndEntryOnBlockStored(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 800)
+	groupIdx := 0
+	slidingWindow := 128
+
+	batch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{
+				BlockHashes:                  engineKeys,
+				Tokens:                       tokens,
+				ParentHash:                   0,
+				GroupIdx:                     &groupIdx,
+				KVCacheSpecKind:              KVCacheSpecKindSlidingWindow,
+				KVCacheSpecSlidingWindowSize: &slidingWindow,
+				BlockSize:                    16,
+			},
+		},
+	}
+	pool.processEventBatch(ctx, batch, "pod-hma", "test-model")
+
+	meta, ok := pool.GroupCatalog().Get("pod-hma", kvblock.GroupID(0))
+	require.True(t, ok)
+	assert.Equal(t, string(KVCacheSpecKindSlidingWindow), meta.Kind)
+	assert.Equal(t, 16, meta.BlockSize)
+	require.NotNil(t, meta.SlidingWindowSize)
+	assert.Equal(t, 128, *meta.SlidingWindowSize)
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, canonicalKeys)
+
+	result, err := idx.Lookup(ctx, canonicalKeys, nil)
+	require.NoError(t, err)
+	for _, ck := range canonicalKeys {
+		entries := result[ck]
+		require.Len(t, entries, 1, "each canonical key should have one entry")
+		assert.True(t, entries[0].HasGroup)
+		assert.Equal(t, kvblock.GroupID(0), entries[0].GroupIdx)
+	}
+}
+
+// TestHMAGroupLevelEviction_BlockRemoved verifies that a BlockRemoved event with GroupIdx
+// performs a group-level eviction, leaving other groups intact.
+func TestHMAGroupLevelEviction_BlockRemoved(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 850)
+
+	// Store two groups for the same block (simulates two BlockStored events)
+	for _, g := range []int{0, 1} {
+		gIdx := g
+		batch := &EventBatch{
+			Events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes:     engineKeys,
+					Tokens:          tokens,
+					ParentHash:      0,
+					GroupIdx:        &gIdx,
+					KVCacheSpecKind: KVCacheSpecKindFullAttention,
+					BlockSize:       16,
+				},
+			},
+		}
+		pool.processEventBatch(ctx, batch, "pod-hma", "test-model")
+	}
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+
+	// Verify both groups present
+	result, err := idx.Lookup(ctx, canonicalKeys, nil)
+	require.NoError(t, err)
+	for _, ck := range canonicalKeys {
+		entries := result[ck]
+		require.Len(t, entries, 2)
+		assert.ElementsMatch(t, []kvblock.GroupID{0, 1}, []kvblock.GroupID{entries[0].GroupIdx, entries[1].GroupIdx})
+	}
+
+	// Evict group 0 only
+	evictGroupIdx := 0
+	removeBatch := &EventBatch{
+		Events: []GenericEvent{
+			&BlockRemovedEvent{
+				BlockHashes: engineKeys,
+				GroupIdx:    &evictGroupIdx,
+			},
+		},
+	}
+	pool.processEventBatch(ctx, removeBatch, "pod-hma", "test-model")
+
+	// Group 1 should remain; group 0 should be gone
+	result, err = idx.Lookup(ctx, canonicalKeys, nil)
+	require.NoError(t, err)
+	for _, ck := range canonicalKeys {
+		entries := result[ck]
+		require.Len(t, entries, 1, "pod should still be present after partial eviction")
+		assert.True(t, entries[0].HasGroup)
+		assert.Equal(t, kvblock.GroupID(1), entries[0].GroupIdx)
+	}
+}
+
 // TestCanonicalWritePath_PartialBlockDrop verifies that tokens fewer than the canonical block
 // size produce zero canonical keys and the event is silently skipped.
 func TestCanonicalWritePath_PartialBlockDrop(t *testing.T) {
@@ -678,4 +795,43 @@ func TestCanonicalWritePath_PartialBlockDrop(t *testing.T) {
 	result, err := idx.Lookup(ctx, []kvblock.BlockHash{kvblock.BlockHash(1)}, nil)
 	require.NoError(t, err)
 	assert.Empty(t, result[kvblock.BlockHash(1)])
+}
+
+// TestAllBlocksCleared_Dispatch verifies the pool wires AllBlocksCleared to
+// Index.Clear: the event drops every entry for the emitting pod and leaves
+// other pods untouched.
+func TestAllBlocksCleared_Dispatch(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	// Same tokens from two pods -> both pods land on the same canonical keys.
+	tokens := makeTokens(64)
+	storeBatch := func(base uint64) *EventBatch {
+		return &EventBatch{
+			Events: []GenericEvent{
+				&BlockStoredEvent{
+					BlockHashes: makeEngineKeys(4, base),
+					Tokens:      tokens,
+					ParentHash:  0,
+				},
+			},
+		}
+	}
+	pool.processEventBatch(ctx, storeBatch(500), "pod-cleared", "test-model")
+	pool.processEventBatch(ctx, storeBatch(900), "pod-kept", "test-model")
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(
+		kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, canonicalKeys)
+
+	clearBatch := &EventBatch{Events: []GenericEvent{&AllBlocksClearedEvent{}}}
+	pool.processEventBatch(ctx, clearBatch, "pod-cleared", "test-model")
+
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, result[ck], 1, "only the surviving pod should remain on key %s", ck)
+		assert.Equal(t, "pod-kept", result[ck][0].PodIdentifier)
+	}
 }

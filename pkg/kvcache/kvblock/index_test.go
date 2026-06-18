@@ -118,6 +118,121 @@ func testCommonIndexBehavior(t *testing.T, indexFactory func(t *testing.T) Index
 		index := indexFactory(t)
 		testEvictPreservesEngineMappingForOtherTiers(t, ctx, index)
 	})
+
+	t.Run("GroupedEntriesCoexist", func(t *testing.T) {
+		index := indexFactory(t)
+		testGroupedEntriesCoexist(t, ctx, index)
+	})
+
+	t.Run("GroupedEvictRemovesOneGroup", func(t *testing.T) {
+		index := indexFactory(t)
+		testGroupedEvictRemovesOneGroup(t, ctx, index)
+	})
+
+	t.Run("GroupedEvictRemovesLastGroup", func(t *testing.T) {
+		index := indexFactory(t)
+		testGroupedEvictRemovesLastGroup(t, ctx, index)
+	})
+
+	t.Run("LookupPreservesGroupIdentity", func(t *testing.T) {
+		index := indexFactory(t)
+		testLookupPreservesGroupIdentity(t, ctx, index)
+	})
+
+	t.Run("ClearBasic", func(t *testing.T) {
+		index := indexFactory(t)
+		testClearBasic(t, ctx, index)
+	})
+
+	t.Run("ClearIsolatesOtherPods", func(t *testing.T) {
+		index := indexFactory(t)
+		testClearIsolatesOtherPods(t, ctx, index)
+	})
+
+	t.Run("ClearAllTiers", func(t *testing.T) {
+		index := indexFactory(t)
+		testClearAllTiers(t, ctx, index)
+	})
+
+	t.Run("ClearThenReAdd", func(t *testing.T) {
+		index := indexFactory(t)
+		testClearThenReAdd(t, ctx, index)
+	})
+}
+
+// testClearBasic verifies Clear makes all of a pod's entries invisible to Lookup.
+func testClearBasic(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	pod := PodEntry{PodIdentifier: "pod-clear", DeviceTier: "gpu"}
+	key := BlockHash(0xC1EA0001)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, []PodEntry{pod}))
+
+	hits, err := index.Lookup(ctx, []BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Len(t, hits[key], 1, "pod should be visible before Clear")
+
+	require.NoError(t, index.Clear(ctx, pod.PodIdentifier))
+
+	hits, err = index.Lookup(ctx, []BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Empty(t, hits[key], "pod must not be visible after Clear")
+}
+
+// testClearIsolatesOtherPods verifies Clear for one pod leaves another pod intact.
+func testClearIsolatesOtherPods(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	podA := PodEntry{PodIdentifier: "pod-A", DeviceTier: "gpu"}
+	podB := PodEntry{PodIdentifier: "pod-B", DeviceTier: "gpu"}
+	key := BlockHash(0xC1EA0002)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, []PodEntry{podA, podB}))
+	require.NoError(t, index.Clear(ctx, podA.PodIdentifier))
+
+	hits, err := index.Lookup(ctx, []BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Len(t, hits[key], 1, "podB must survive clearing podA")
+	assert.Equal(t, podB, hits[key][0])
+}
+
+// testClearAllTiers verifies Clear is pod-wide: it removes the pod across every
+// device tier and entry variant (including HMA-grouped entries), while leaving
+// a different pod on the same tier intact.
+func testClearAllTiers(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	gpu := PodEntry{PodIdentifier: "pod-tiers", DeviceTier: "gpu"}
+	cpu := PodEntry{PodIdentifier: "pod-tiers", DeviceTier: "cpu"}
+	grouped := PodEntry{PodIdentifier: "pod-tiers", DeviceTier: "gpu", HasGroup: true, GroupIdx: 1}
+	other := PodEntry{PodIdentifier: "pod-other", DeviceTier: "gpu"}
+	key := BlockHash(0xC1EA0003)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, []PodEntry{gpu, cpu, grouped, other}))
+
+	require.NoError(t, index.Clear(ctx, "pod-tiers"))
+
+	hits, err := index.Lookup(ctx, []BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Len(t, hits[key], 1, "all tiers and group variants of pod-tiers must be cleared; pod-other survives")
+	assert.Equal(t, other, hits[key][0])
+}
+
+// testClearThenReAdd verifies a pod re-added after Clear is visible again.
+func testClearThenReAdd(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	pod := PodEntry{PodIdentifier: "pod-readd", DeviceTier: "gpu"}
+	key := BlockHash(0xC1EA0004)
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, []PodEntry{pod}))
+	require.NoError(t, index.Clear(ctx, pod.PodIdentifier))
+
+	hits, err := index.Lookup(ctx, []BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Empty(t, hits[key], "pod must be invisible right after Clear")
+
+	require.NoError(t, index.Add(ctx, nil, []BlockHash{key}, []PodEntry{pod}))
+	hits, err = index.Lookup(ctx, []BlockHash{key}, sets.Set[string]{})
+	require.NoError(t, err)
+	assert.Len(t, hits[key], 1, "re-added pod must be visible after Clear")
 }
 
 // testBasicAddAndLookup tests basic Add and Lookup functionality.
@@ -790,4 +905,70 @@ func testEvictPreservesEngineMappingForOtherTiers(t *testing.T, ctx context.Cont
 	// Engine→request mapping should be gone.
 	_, err = index.GetRequestKey(ctx, engineKey)
 	assert.Error(t, err, "engine→request mapping should be removed after full eviction")
+}
+
+func testGroupedEntriesCoexist(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	engineKey := BlockHash(11111111)
+	requestKey := BlockHash(22222222)
+
+	pod0 := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0}
+	err := index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{pod0})
+	require.NoError(t, err)
+
+	pod1 := PodEntry{PodIdentifier: "pod-a", DeviceTier: "gpu", HasGroup: true, GroupIdx: 1}
+	err = index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{pod1})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []PodEntry{pod0, pod1}, podsPerKey[requestKey])
+}
+
+func testGroupedEvictRemovesOneGroup(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	engineKey := BlockHash(33333333)
+	requestKey := BlockHash(44444444)
+
+	podG0 := PodEntry{PodIdentifier: "pod-b", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0}
+	podG1 := PodEntry{PodIdentifier: "pod-b", DeviceTier: "gpu", HasGroup: true, GroupIdx: 1}
+	err := index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podG0, podG1})
+	require.NoError(t, err)
+
+	err = index.Evict(ctx, engineKey, EngineKey, []PodEntry{podG1})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []PodEntry{podG0}, podsPerKey[requestKey])
+}
+
+func testGroupedEvictRemovesLastGroup(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	engineKey := BlockHash(66666666)
+	requestKey := BlockHash(77777777)
+
+	podG0 := PodEntry{PodIdentifier: "pod-d", DeviceTier: "gpu", HasGroup: true, GroupIdx: 0}
+	err := index.Add(ctx, []BlockHash{engineKey}, []BlockHash{requestKey}, []PodEntry{podG0})
+	require.NoError(t, err)
+
+	err = index.Evict(ctx, engineKey, EngineKey, []PodEntry{podG0})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+	require.NoError(t, err)
+	assert.Empty(t, podsPerKey[requestKey], "entry should be gone after last group evicted")
+}
+
+func testLookupPreservesGroupIdentity(t *testing.T, ctx context.Context, index Index) {
+	t.Helper()
+	requestKey := BlockHash(88888888)
+	pod := PodEntry{PodIdentifier: "pod-e", DeviceTier: "gpu", HasGroup: true, GroupIdx: 2}
+	err := index.Add(ctx, nil, []BlockHash{requestKey}, []PodEntry{pod})
+	require.NoError(t, err)
+
+	podsPerKey, err := index.Lookup(ctx, []BlockHash{requestKey}, nil)
+	require.NoError(t, err)
+	require.Len(t, podsPerKey[requestKey], 1)
+	assert.Equal(t, pod, podsPerKey[requestKey][0])
 }

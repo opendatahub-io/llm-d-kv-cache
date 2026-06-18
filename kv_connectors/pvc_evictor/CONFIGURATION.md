@@ -26,6 +26,18 @@ All configuration is done through environment variables. These can be set direct
 | `DELETION_BATCH_SIZE` | int | `100` | > 0 | Files per deletion batch (deleter process) |
 | `FILE_ACCESS_TIME_THRESHOLD_MINUTES` | float | `60.0` | >= 0 | Skip files accessed within this time (minutes) |
 
+### Empty Directory Cleanup
+
+| Variable | Type | Default | Valid Values | Description |
+|----------|------|---------|--------------|-------------|
+| `ENABLE_DIR_CLEANUP` | bool | `true` | true/false | Run the background folder-cleaner process (P(N+3)) that removes empty cache directories left behind after file deletion |
+| `DIR_CLEANUP_TTL_SECONDS` | float | `120.0` | >= 0 | Skip queueing empty directories modified within this window, to avoid racing a writer that just created a bucket and is about to populate it |
+
+The crawler and deleter discover empty directories and hand them to the
+folder cleaner, which removes them with `os.rmdir` (a no-op if a file lands
+in the directory first). Set `ENABLE_DIR_CLEANUP=false` to disable the
+process entirely.
+
 ### Safety Configuration
 
 | Variable | Type | Default | Description |
@@ -34,7 +46,7 @@ All configuration is done through environment variables. These can be set direct
 | `LOG_LEVEL` | string | `INFO` | Logging verbosity: DEBUG, INFO, WARNING, ERROR |
 | `LOG_FILE_PATH` | string | `None` | Optional file path to write logs to (in addition to stdout) |
 
-**Note:** The evictor uses the canonical FileMapper structure from `llmd_fs_backend`, which matches the vLLM offloader's file organization.
+**Note:** `CACHE_DIRECTORY` must match the path under `shared_storage_path` where vLLM writes KV offload files (flat `<model>_<digest>_r<rank>/` layout). Verify with `find <mount>/<CACHE_DIRECTORY> -path '*_r*' -name '*.bin' | head`.
 
 ## Helm Chart Configuration
 

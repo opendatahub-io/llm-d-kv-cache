@@ -45,7 +45,17 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
     """
 
     def __init__(self, vllm_config: VllmConfig, kv_cache_config: KVCacheConfig):
-        super().__init__(vllm_config, kv_cache_config)
+        # Hide "block_size" from the base class to bypass the uniformity
+        # assertion on hybrid models (we derive the factor ourselves below).
+        kv_transfer_config = vllm_config.kv_transfer_config
+        assert kv_transfer_config is not None
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        hidden_block_size = extra_config.pop("block_size", None)
+        try:
+            super().__init__(vllm_config, kv_cache_config)
+        finally:
+            if hidden_block_size is not None:
+                extra_config["block_size"] = hidden_block_size
 
         self._manager: OffloadingManager | None = None
         # worker-side
@@ -67,15 +77,16 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             self.extra_config.get("block_size", DEFAULT_STORAGE_BLOCK_SIZE)
         )
 
-        assert len(self.gpu_block_size) == 1, (
-            f"Expected exactly one KV cache group, got {len(self.gpu_block_size)}"
-        )
-
-        hash_block_size = vllm_config.cache_config.block_size
-        assert self.offloaded_block_size % hash_block_size == 0, (
+        # hash_block_size = GCD of all groups' block sizes (the granularity at
+        # which Request.block_hashes are computed); use it instead of
+        # cache_config.block_size which can be larger on hybrid models (e.g. DSv4).
+        assert self.offloaded_block_size % self.hash_block_size == 0, (
             "offloaded_block_size must be a multiple of hash_block_size"
         )
-        self.gpu_blocks_per_file = self.offloaded_block_size // hash_block_size
+        self.gpu_blocks_per_file = self.offloaded_block_size // self.hash_block_size
+
+        # Derive block_size_factor from file layout instead of base class.
+        self.block_size_factor = self.gpu_blocks_per_file
 
         self.read_preferring_ratio = float(
             self.extra_config.get(
@@ -137,7 +148,7 @@ class SharedStorageOffloadingSpec(OffloadingSpec):
             self._handlers = handlers_cls(
                 file_mapper=self.file_mapper,
                 gpu_blocks_per_file=self.gpu_blocks_per_file,
-                gpu_block_size=self.gpu_block_size[0],
+                gpu_block_size=self.hash_block_size,
                 kv_caches=kv_caches,
                 threads_per_gpu=self.threads_per_gpu,
                 max_staging_memory_gb=self.max_staging_memory_gb,

@@ -146,6 +146,12 @@ type Index interface {
 	Evict(ctx context.Context, key BlockHash, keyType KeyType, entries []PodEntry) error
 	// GetRequestKey returns the requestKey associated with the given engineKey.
 	GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error)
+	// Clear removes all index entries for the given pod, across every device tier.
+	// It backs the AllBlocksCleared KV-event (a vLLM prefix-cache reset, e.g. after
+	// an RLHF weight update), which is pod-wide — vLLM emits it with no tier. Clear is
+	// O(N) over the index but runs off the Lookup/Add hot path, at a coarse cadence
+	// (typically once per weight sync).
+	Clear(ctx context.Context, podIdentifier string) error
 }
 
 // KeyType indicates whether a key passed to Evict is an engine key or a request key.
@@ -180,6 +186,10 @@ type PodEntry struct {
 	DeviceTier string
 	// Speculative indicates the entry was added predictively before a KV event confirmed it.
 	Speculative bool
+	// HasGroup indicates GroupIdx identifies a vLLM KV cache group.
+	HasGroup bool
+	// GroupIdx identifies the vLLM KV cache group for HMA events.
+	GroupIdx GroupID
 }
 
 // String returns a string representation of the PodEntry.
@@ -187,6 +197,9 @@ func (e *PodEntry) String() string {
 	suffix := ""
 	if e.Speculative {
 		suffix = "[speculative]"
+	}
+	if e.HasGroup {
+		suffix += fmt.Sprintf("[group=%d]", e.GroupIdx)
 	}
 	return fmt.Sprintf("%s@%s%s", e.PodIdentifier, e.DeviceTier, suffix)
 }
