@@ -18,6 +18,7 @@ package kvblock
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -217,16 +218,12 @@ func (r *RedisIndex) Lookup(ctx context.Context, requestKeys []BlockHash,
 
 		var filteredPods []PodEntry
 		for _, p := range pods {
-			ip := strings.SplitN(p, "@", 2)[0]
-			if !filterPods || podIdentifierSet.Has(ip) {
-				tier := strings.SplitN(p, "@", 2)[1]
-				speculative := false
-				// Strip annotation suffix e.g. "gpu[speculative]" -> "gpu"
-				if idx := strings.Index(tier, "["); idx != -1 {
-					speculative = strings.Contains(tier[idx:], "speculative")
-					tier = tier[:idx]
-				}
-				filteredPods = append(filteredPods, PodEntry{PodIdentifier: ip, DeviceTier: tier, Speculative: speculative})
+			pod, ok := decodeRedisPodField(p)
+			if !ok {
+				continue
+			}
+			if !filterPods || podIdentifierSet.Has(pod.PodIdentifier) {
+				filteredPods = append(filteredPods, pod)
 			}
 		}
 
@@ -270,7 +267,11 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 	for _, requestKey := range requestKeys {
 		redisKey := requestKey.String()
 		for _, entry := range entries {
-			pipe.HSet(ctx, redisKey, entry.String(), "")
+			field, err := encodeRedisPodField(entry)
+			if err != nil {
+				return err
+			}
+			pipe.HSet(ctx, redisKey, field, "")
 		}
 	}
 
@@ -324,7 +325,11 @@ func (r *RedisIndex) evictPodsFromRequestKey(ctx context.Context, requestKey Blo
 	pipe := r.RedisClient.Pipeline()
 
 	for _, entry := range entries {
-		pipe.HDel(ctx, redisKey, entry.String())
+		field, err := encodeRedisPodField(entry)
+		if err != nil {
+			return err
+		}
+		pipe.HDel(ctx, redisKey, field)
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
@@ -337,6 +342,23 @@ func (r *RedisIndex) evictPodsFromRequestKey(ctx context.Context, requestKey Blo
 	}
 
 	return nil
+}
+
+func encodeRedisPodField(entry PodEntry) (string, error) {
+	value, err := json.Marshal(entry)
+	if err != nil {
+		return "", fmt.Errorf("failed to encode pod entry for Redis: %w", err)
+	}
+	return string(value), nil
+}
+
+func decodeRedisPodField(field string) (PodEntry, bool) {
+	var entry PodEntry
+	if err := json.Unmarshal([]byte(field), &entry); err != nil {
+		return PodEntry{}, false
+	}
+
+	return entry, true
 }
 
 // getRequestKeys returns all request keys mapped to the given engine key.
@@ -362,7 +384,12 @@ func (r *RedisIndex) getRequestKeys(ctx context.Context, engineKey BlockHash) ([
 
 // GetRequestKey returns the last request key (highest score) associated with the given engineKey.
 func (r *RedisIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (BlockHash, error) {
-	vals, err := r.RedisClient.ZRevRange(ctx, redisEngineKey(engineKey), 0, 0).Result()
+	vals, err := r.RedisClient.ZRangeArgs(ctx, redis.ZRangeArgs{
+		Key:   redisEngineKey(engineKey),
+		Start: 0,
+		Stop:  0,
+		Rev:   true,
+	}).Result()
 	if err != nil {
 		return EmptyBlockHash, err
 	}
@@ -379,4 +406,62 @@ func (r *RedisIndex) GetRequestKey(ctx context.Context, engineKey BlockHash) (Bl
 
 func redisEngineKey(engineKey BlockHash) string {
 	return "engine:" + engineKey.String()
+}
+
+// Clear removes every hash field for the pod across all request-key hashes and
+// device tiers. Each field is a JSON-encoded PodEntry, so matching decodes the
+// field and compares PodIdentifier — catching every tier, group, and speculative
+// variant. It pages the keyspace with SCAN (skipping engine: keys), HDELs the
+// pod's fields, and prunes now-empty hashes. O(keyspace), but Clear is rare and
+// off the Lookup/Add hot path. Because it deletes from the shared store, it is
+// correct for multi-replica deployments with no cross-process coordination.
+func (r *RedisIndex) Clear(ctx context.Context, podIdentifier string) error {
+	logger := log.FromContext(ctx).WithName("kvblock.RedisIndex.Clear")
+
+	const scanBatch int64 = 1024
+	removed := 0
+	var cursor uint64
+	for {
+		keys, next, err := r.RedisClient.Scan(ctx, cursor, "*", scanBatch).Result()
+		if err != nil {
+			return fmt.Errorf("clear scan failed: %w", err)
+		}
+		for _, key := range keys {
+			if strings.HasPrefix(key, "engine:") {
+				continue // engine:<hash> ZSETs hold no pod fields
+			}
+
+			fields, err := r.RedisClient.HKeys(ctx, key).Result()
+			if err != nil {
+				return fmt.Errorf("clear hkeys failed for %s: %w", key, err)
+			}
+
+			var stale []string
+			for _, field := range fields {
+				if entry, ok := decodeRedisPodField(field); ok && entry.PodIdentifier == podIdentifier {
+					stale = append(stale, field)
+				}
+			}
+			if len(stale) == 0 {
+				continue
+			}
+
+			if err := r.RedisClient.HDel(ctx, key, stale...).Err(); err != nil {
+				return fmt.Errorf("clear hdel failed for %s: %w", key, err)
+			}
+			removed += len(stale)
+
+			if err := pruneRequestKeyScript.Run(ctx, r.RedisClient, []string{key}).Err(); err != nil &&
+				!errors.Is(err, redis.Nil) {
+				return fmt.Errorf("clear prune failed for %s: %w", key, err)
+			}
+		}
+
+		if cursor = next; cursor == 0 {
+			break
+		}
+	}
+
+	logger.Info("cleared pod from index", "pod", podIdentifier, "removed", removed)
+	return nil
 }
