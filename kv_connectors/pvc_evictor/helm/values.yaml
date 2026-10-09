@@ -70,6 +70,8 @@ config:
   fileQueueMinSize: 1000
   # Files per deletion batch (deleter process)
   deletionBatchSize: 100
+  # Max files the deleter stats and unlinks per second (0 = unlimited)
+  deletionMaxFilesPerSecond: 0
   # Skip files accessed within this time (minutes)
   fileAccessTimeThresholdMinutes: 60
 
