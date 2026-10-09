@@ -161,9 +161,13 @@ kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[0].secu
 | `livenessProbe.enabled` | Enable liveness probe | `true` |
 | `livenessProbe.initialDelaySeconds` | Initial delay | `30` |
 | `livenessProbe.periodSeconds` | Check period | `30` |
+| `livenessProbe.command` | Exec command replacing the default python3 mount-path check | `[]` |
+| `livenessProbe.timeoutSeconds` | Probe timeout (Kubernetes default 1s when unset) | `null` |
 | `readinessProbe.enabled` | Enable readiness probe | `true` |
 | `readinessProbe.initialDelaySeconds` | Initial delay | `10` |
 | `readinessProbe.periodSeconds` | Check period | `10` |
+| `readinessProbe.command` | Exec command replacing the default python3 mount-path check | `[]` |
+| `readinessProbe.timeoutSeconds` | Probe timeout (Kubernetes default 1s when unset) | `null` |
 
 #### Other Configuration
 

@@ -96,22 +96,36 @@ spec:
         livenessProbe:
           exec:
             command:
+            {{- if .Values.livenessProbe.command }}
+            {{- toYaml .Values.livenessProbe.command | nindent 12 }}
+            {{- else }}
             - python3
             - -c
             - "import os; exit(0 if os.path.exists('{{ .Values.pvc.mountPath }}') else 1)"
+            {{- end }}
           initialDelaySeconds: {{ .Values.livenessProbe.initialDelaySeconds }}
           periodSeconds: {{ .Values.livenessProbe.periodSeconds }}
+          {{- with .Values.livenessProbe.timeoutSeconds }}
+          timeoutSeconds: {{ . }}
+          {{- end }}
         {{- end }}
         
         {{- if .Values.readinessProbe.enabled }}
         readinessProbe:
           exec:
             command:
+            {{- if .Values.readinessProbe.command }}
+            {{- toYaml .Values.readinessProbe.command | nindent 12 }}
+            {{- else }}
             - python3
             - -c
             - "import os; exit(0 if os.path.exists('{{ .Values.pvc.mountPath }}') else 1)"
+            {{- end }}
           initialDelaySeconds: {{ .Values.readinessProbe.initialDelaySeconds }}
           periodSeconds: {{ .Values.readinessProbe.periodSeconds }}
+          {{- with .Values.readinessProbe.timeoutSeconds }}
+          timeoutSeconds: {{ . }}
+          {{- end }}
         {{- end }}
       
       volumes:

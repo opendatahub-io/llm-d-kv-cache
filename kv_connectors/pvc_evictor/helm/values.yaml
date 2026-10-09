@@ -108,11 +108,21 @@ livenessProbe:
   enabled: true
   initialDelaySeconds: 30
   periodSeconds: 30
+  # Optional exec command overriding the default python3 mount-path check,
+  # e.g. ["kvreap", "healthcheck", "--live"]
+  command: []
+  # Optional; Kubernetes defaults to 1s
+  timeoutSeconds: null
 
 readinessProbe:
   enabled: true
   initialDelaySeconds: 10
   periodSeconds: 10
+  # Optional exec command overriding the default python3 mount-path check,
+  # e.g. ["kvreap", "healthcheck", "--ready"]
+  command: []
+  # Optional; Kubernetes defaults to 1s
+  timeoutSeconds: null
 
 # Pod labels
 labels:
