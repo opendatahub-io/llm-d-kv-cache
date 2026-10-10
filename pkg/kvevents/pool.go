@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/metrics"
 	"github.com/llm-d/llm-d-kv-cache/pkg/utils/logging"
 )
 
@@ -32,6 +33,17 @@ const (
 	defaultEventSourceDeviceTier = "gpu"
 	defaultPodSelector           = "llm-d.ai/inference-serving=true"
 )
+
+// normalizeDeviceTier lowercases an event's device tier and defaults an empty
+// value to the GPU source tier. Store and remove events that mean the same tier
+// must normalize identically so they build equal PodEntries and dedup scopes;
+// keeping this in one place prevents the two call sites from drifting apart.
+func normalizeDeviceTier(deviceTier string) string {
+	if deviceTier == "" {
+		return defaultEventSourceDeviceTier
+	}
+	return strings.ToLower(deviceTier)
+}
 
 // Config holds the configuration for the event processing pool.
 type Config struct {
@@ -87,7 +99,8 @@ func DefaultConfig() *Config {
 
 // Pool is a sharded worker pool that processes events from ZMQ subscribers.
 // It ensures that events for the same PodIdentifier are processed in order.
-// Pool is stateless — all key mappings are delegated to the Index.
+// Pool keeps transient event-stream state while durable key mappings are
+// delegated to the Index.
 type Pool struct {
 	queues         []workqueue.TypedRateLimitingInterface[*RawMessage]
 	concurrency    int // can replace use with len(queues)
@@ -95,7 +108,12 @@ type Pool struct {
 	tokenProcessor kvblock.TokenProcessor
 	adapter        EngineAdapter
 	groupCatalog   *kvblock.GroupCatalog
-	wg             sync.WaitGroup
+	// dedup lives in the Pool, not as an Index decorator, because its scope is
+	// built from event fields absent from the Index.Evict signature (device
+	// tier, KV-cache group, DP rank) and a store must be counted only after
+	// Index.Add succeeds — both of which only the Pool observes.
+	dedup *eventDedupFilter
+	wg    sync.WaitGroup
 }
 
 // NewPool creates a Pool with a sharded worker setup.
@@ -115,6 +133,7 @@ func NewPool(cfg *Config, index kvblock.Index, tokenProcessor kvblock.TokenProce
 		tokenProcessor: tokenProcessor,
 		adapter:        adapter,
 		groupCatalog:   kvblock.NewGroupCatalog(),
+		dedup:          newEventDedupFilter(),
 	}
 
 	for i := 0; i < p.concurrency; i++ {
@@ -262,16 +281,20 @@ func realignExtraFeatures(engineFeatures []*kvblock.BlockExtraFeatures, canonica
 // handleDeviceTierUpdate handles offloading/location-only events (e.g., DeviceTier=CPU
 // with no tokens). It resolves existing request keys from the engine→request mapping and
 // adds the new PodEntry so the EPP tracks which device tiers hold each block.
+//
+// It returns true only when at least one engine key resolved and the resulting
+// PodEntry was added to the index, so the caller knows the store took effect
+// and can reference-count it.
 func (p *Pool) handleDeviceTierUpdate(
 	ctx context.Context, tokens []uint32, engineKeys []kvblock.BlockHash,
 	podEntries []kvblock.PodEntry, podIdentifier, deviceTier string,
-) {
+) bool {
 	debugLogger := log.FromContext(ctx).V(logging.DEBUG)
 
 	// Only attempt resolution when tokens are truly absent; partial-block
 	// events (tokens < blockSize) should just be skipped.
 	if len(tokens) != 0 || len(engineKeys) == 0 {
-		return
+		return false
 	}
 
 	seen := make(map[kvblock.BlockHash]struct{})
@@ -287,15 +310,18 @@ func (p *Pool) handleDeviceTierUpdate(
 		}
 	}
 
-	if len(resolvedKeys) > 0 {
-		if err := p.index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
-			debugLogger.Error(err, "Failed to add device-tier update to index",
-				"podIdentifier", podIdentifier, "deviceTier", deviceTier)
-		}
-	} else {
+	if len(resolvedKeys) == 0 {
 		debugLogger.Info("no indexed engine keys found for device-tier update, skipping",
 			"podIdentifier", podIdentifier, "engineKeyCount", len(engineKeys))
+		return false
 	}
+
+	if err := p.index.Add(ctx, nil, resolvedKeys, podEntries); err != nil {
+		debugLogger.Error(err, "Failed to add device-tier update to index",
+			"podIdentifier", podIdentifier, "deviceTier", deviceTier)
+		return false
+	}
+	return true
 }
 
 // processEventBatch processes a batch of events using type switches.
@@ -310,10 +336,16 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 	for _, genericEvent := range batch.Events {
 		switch ev := genericEvent.(type) {
 		case *BlockStoredEvent:
-			// Default to gpu.
-			deviceTier := defaultEventSourceDeviceTier
-			if ev.DeviceTier != "" {
-				deviceTier = strings.ToLower(ev.DeviceTier)
+			deviceTier := normalizeDeviceTier(ev.DeviceTier)
+
+			// Scope for reference-counting this store against duplicate removes.
+			// Mirrors the index eviction identity (pod, tier, group); DP rank is
+			// the sentinel until PR #370 makes the index DP-aware.
+			storeScope := blockScope{
+				podIdentifier:    podIdentifier,
+				deviceTier:       deviceTier,
+				groupIdx:         groupIdxOrNoGroup(ev.GroupIdx),
+				dataParallelRank: noDataParallelRank,
 			}
 
 			// Use LoRA name as model identifier if available, otherwise fall back to base model name.
@@ -412,7 +444,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 			}
 
 			if len(requestKeys) == 0 {
-				p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier)
+				if p.handleDeviceTierUpdate(ctx, ev.Tokens, engineKeys, podEntries, podIdentifier, deviceTier) {
+					p.dedup.trackStore(storeScope, ev.BlockHashes)
+				}
 				continue
 			}
 
@@ -423,13 +457,10 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 					"podIdentifier", podIdentifier, "event", ev)
 				continue
 			}
+			p.dedup.trackStore(storeScope, ev.BlockHashes)
 
 		case *BlockRemovedEvent:
-			// Default to gpu.
-			deviceTier := defaultEventSourceDeviceTier
-			if ev.DeviceTier != "" {
-				deviceTier = strings.ToLower(ev.DeviceTier)
-			}
+			deviceTier := normalizeDeviceTier(ev.DeviceTier)
 
 			// Create PodEntry for this specific event's device tier.
 			podEntries := []kvblock.PodEntry{{PodIdentifier: podIdentifier, DeviceTier: deviceTier}}
@@ -438,10 +469,34 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				podEntries[0].GroupIdx = kvblock.GroupID(*ev.GroupIdx)
 			}
 
-			// Iterate over the hashes and evict each key.
+			// Reference-count duplicate removes: vLLM chunk-mode offloading can
+			// re-announce a shared constituent hash across overlapping chunks, so
+			// only forward a hash to the index once no outstanding store still
+			// references it. Unknown hashes pass through (Evict is a no-op).
+			removeScope := blockScope{
+				podIdentifier:    podIdentifier,
+				deviceTier:       deviceTier,
+				groupIdx:         groupIdxOrNoGroup(ev.GroupIdx),
+				dataParallelRank: noDataParallelRank,
+			}
+			hashesToEvict := p.dedup.filterRemove(removeScope, ev.BlockHashes)
+
+			// Observe how many constituent block hashes were forwarded vs.
+			// suppressed (these count block hashes, not BlockRemoved events).
+			if forwarded := len(hashesToEvict); forwarded > 0 {
+				metrics.DedupRemovedHashesForwarded.Add(float64(forwarded))
+			}
+			if suppressed := len(ev.BlockHashes) - len(hashesToEvict); suppressed > 0 {
+				metrics.DedupRemovedHashesSuppressed.Add(float64(suppressed))
+				log.FromContext(ctx).V(logging.TRACE).Info("Suppressed duplicate block removals",
+					"podIdentifier", podIdentifier, "deviceTier", deviceTier,
+					"received", len(ev.BlockHashes), "forwarded", len(hashesToEvict), "suppressed", suppressed)
+			}
+
+			// Iterate over the surviving hashes and evict each key.
 			// The Index handles engine->request key resolution internally for both
 			// 1:1 (legacy) and 1:many (canonical) mappings.
-			for _, hash := range ev.BlockHashes {
+			for _, hash := range hashesToEvict {
 				engineKey := kvblock.BlockHash(hash)
 				if err := p.index.Evict(ctx, engineKey, kvblock.EngineKey, podEntries); err != nil {
 					debugLogger.Error(err, "Failed to evict engine key from index",
@@ -471,6 +526,9 @@ func (p *Pool) processEventBatch(ctx context.Context, batch *EventBatch, podIden
 				debugLogger.Error(err, "Failed to clear pod from index",
 					"podIdentifier", podIdentifier)
 			}
+			// Reset reference counts for this pod in lockstep with the index's
+			// pod-wide eager clear, so no stale references survive the reset.
+			p.dedup.clear(podIdentifier)
 
 		default:
 			debugLogger.Info("Unknown event", "podIdentifier", podIdentifier, "event", genericEvent)

@@ -9,4 +9,4 @@ permissions:
 
 jobs:
   prow:
-    uses: llm-d/llm-d-infra/.github/workflows/reusable-prow-commands.yaml@main
+    uses: llm-d/llm-d-infra/.github/workflows/reusable-prow-commands.yaml@991b7368b05664fdaa9788521e7482655323e0a4 # main

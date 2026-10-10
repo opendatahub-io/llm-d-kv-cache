@@ -8,9 +8,15 @@ on:
     types: [published]  # Also runs when a GitHub release is published
   workflow_dispatch:  # Allow manual trigger from GitHub UI
 
+permissions:
+  contents: read
+  packages: write
+  security-events: write
+
 jobs:
   docker-build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
