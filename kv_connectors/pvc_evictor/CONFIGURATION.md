@@ -1,10 +1,10 @@
 # PVC Evictor Configuration Guide
 
-This document provides comprehensive configuration reference for the PVC Evictor.
+This document provides configuration reference for the Python PVC Evictor and its Helm chart. The Go implementation uses a separate deployment path and is not deployed or configured by Helm.
 
 ## Environment Variables
 
-All configuration is done through environment variables. These can be set directly in the deployment YAML or through Helm chart values.
+The Python implementation reads environment variables. In the Helm deployment, these values are set through Helm chart values.
 
 ### Core Configuration
 
@@ -24,6 +24,7 @@ All configuration is done through environment variables. These can be set direct
 | `FILE_QUEUE_MAXSIZE` | int | `10000` | > 0 | Max items in queue when deletion is ON |
 | `FILE_QUEUE_MIN_SIZE` | int | `1000` | > 0 | Pre-fill queue to this size when deletion is OFF |
 | `DELETION_BATCH_SIZE` | int | `100` | > 0 | Files per deletion batch (deleter process) |
+| `DELETION_MAX_FILES_PER_SECOND` | float | `0` | >= 0 | Max files the deleter stats and unlinks per second; `0` = unlimited |
 | `FILE_ACCESS_TIME_THRESHOLD_MINUTES` | float | `60.0` | >= 0 | Skip files accessed within this time (minutes) |
 
 ### Empty Directory Cleanup
@@ -48,7 +49,7 @@ process entirely.
 
 **Note:** `CACHE_DIRECTORY` must match the path under `shared_storage_path` where vLLM writes KV offload files (flat `<model>_<digest>_r<rank>/` layout). Verify with `find <mount>/<CACHE_DIRECTORY> -path '*_r*' -name '*.bin' | head`.
 
-## Helm Chart Configuration
+## Python Helm Chart Configuration
 
 When using the Helm chart, configuration is done through `values.yaml`:
 

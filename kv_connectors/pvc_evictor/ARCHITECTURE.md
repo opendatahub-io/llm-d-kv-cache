@@ -4,11 +4,16 @@ This document describes the internal architecture and design of the PVC Evictor.
 
 ## Overview
 
-The PVC Evictor is a multi-process Python application that automatically manages disk space on Kubernetes Persistent Volume Claims used for vLLM KV-cache storage.
+The PVC Evictor has two implementations:
 
-## Process Architecture
+- The legacy Python implementation is a multi-process application.
+- The Go implementation is a single-process application using supervised goroutines.
 
-The evictor uses an **N+2 process architecture**:
+The Helm chart deploys only the Python implementation. The Go implementation is a separate build and deployment path and is not deployed by Helm.
+
+## Legacy Python Process Architecture
+
+The Python implementation uses an **N+2 process architecture**, plus an optional folder-cleaner process:
 
 ```mermaid
 graph TB
@@ -48,6 +53,59 @@ graph TB
     Del -->|check flag| DelEvent
     Del -..->|delete files| PVC
 ```
+
+## Go Worker Architecture
+
+The Go implementation runs in one operating-system process. `service.Run` starts
+and supervises worker goroutines, restarting a worker if it exits unexpectedly.
+
+```mermaid
+graph TB
+    subgraph "Go PVC Evictor Process"
+        Main[service.Run<br/>supervised workers]
+
+        subgraph "Crawler Goroutines"
+            C1[Crawler 1<br/>hex range: 0-1]
+            ...
+            CN[Crawler N<br/>hex range: E-F]
+        end
+
+        Act[Activator Goroutine<br/>statfs disk usage]
+        Del[Deleter Goroutine<br/>cold-file deletion]
+        Clean[Folder Cleaner Goroutine<br/>optional]
+
+        FileQueue[chan string<br/>file paths]
+        FolderQueue[chan string<br/>empty directories]
+        DelActive[atomic.Bool<br/>deletion active]
+    end
+
+    PVC[PVC Mount<br/>/kv-cache]
+
+    Main -->|supervises & restarts| C1
+    Main -->|supervises & restarts| CN
+    Main -->|supervises & restarts| Act
+    Main -->|supervises & restarts| Del
+    Main -->|supervises & restarts| Clean
+
+    C1 -..->|scan files| PVC
+    CN -..->|scan files| PVC
+    C1 -->|put file paths| FileQueue
+    CN -->|put file paths| FileQueue
+    C1 -.->|queue empty dirs| FolderQueue
+    CN -.->|queue empty dirs| FolderQueue
+
+    Act -..->|check usage| PVC
+    Act -->|set/clear| DelActive
+
+    Del -->|get file paths| FileQueue
+    Del -->|check flag| DelActive
+    Del -.->|queue emptied parents| FolderQueue
+    Del -..->|delete files| PVC
+    Clean -->|remove empty dirs| FolderQueue
+    Clean -..->|remove empty dirs| PVC
+```
+
+## Legacy Python Process Details
 
 ### Process Roles
 
