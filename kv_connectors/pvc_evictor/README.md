@@ -96,7 +96,8 @@ Files are classified as hot/cold based on access time (`st_atime`):
 - **Automatic Threshold-Based Deletion** - Triggers at 85% usage, stops at 70% (configurable)
 - **Hot Cache Protection** - Skips recently accessed files based on access time
 - **Parallel File Discovery** - Configurable crawler processes (1-16) for multi-TB volumes
-- **Batch Deletion** - Efficient deletion using `xargs rm -f`
+- **Paced Deletion** - One `stat` and one `unlink` per file, optionally rate-limited with `DELETION_MAX_FILES_PER_SECOND`
+- **Idle When Not Needed** - Crawlers pause once the pre-fill queue is full, so the evictor adds no metadata load while usage is below threshold
 - **Streaming Architecture** - No memory accumulation, works with multi-TB storage
 - **Flat cache layout** - Path-based discovery matching llmd_fs_backend v0.20+ on-disk layout
 - **Aggregated Logging** - Unified system status every 30 seconds

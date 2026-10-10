@@ -15,6 +15,7 @@ DEFAULT_LOGGER_INTERVAL = 0.5
 DEFAULT_FILE_QUEUE_MAXSIZE = 10000
 DEFAULT_FILE_QUEUE_MIN_SIZE = 1000
 DEFAULT_DELETION_BATCH_SIZE = 100
+DEFAULT_DELETION_MAX_FILES_PER_SECOND = 0.0
 DEFAULT_FILE_ACCESS_TIME_THRESHOLD_MINUTES = 60.0
 DEFAULT_HEX_BUCKET_LEN = 3
 DEFAULT_STORAGE_EVENTS_ENDPOINT = ""
@@ -48,6 +49,8 @@ class Config:
     # log_file_path: Optional file logging for persistent log storage and debugging
     log_file_path: str | None = None  # Optional file path to write logs to (default: None, stdout only)
     storage_events_endpoint: str = ""  # Storage events publisher endpoint
+    # Cap on files the deleter stats and unlinks per second (default: 0 = unlimited)
+    deletion_max_files_per_second: float = DEFAULT_DELETION_MAX_FILES_PER_SECOND
 
     def to_dict(self) -> dict:
         """Convert configuration to dictionary for multiprocessing."""
@@ -59,6 +62,7 @@ class Config:
             "dry_run": self.dry_run,
             "log_level": self.log_level,
             "deletion_batch_size": self.deletion_batch_size,
+            "deletion_max_files_per_second": self.deletion_max_files_per_second,
             "file_queue_min_size": self.file_queue_min_size,
             "file_queue_maxsize": self.file_queue_maxsize,
             "log_file_path": self.log_file_path,
@@ -84,6 +88,9 @@ class Config:
             file_queue_maxsize=int(float(os.getenv("FILE_QUEUE_MAXSIZE", str(DEFAULT_FILE_QUEUE_MAXSIZE)))),
             file_queue_min_size=int(float(os.getenv("FILE_QUEUE_MIN_SIZE", str(DEFAULT_FILE_QUEUE_MIN_SIZE)))),
             deletion_batch_size=int(float(os.getenv("DELETION_BATCH_SIZE", str(DEFAULT_DELETION_BATCH_SIZE)))),
+            deletion_max_files_per_second=float(
+                os.getenv("DELETION_MAX_FILES_PER_SECOND", str(DEFAULT_DELETION_MAX_FILES_PER_SECOND))
+            ),
             log_file_path=os.getenv("LOG_FILE_PATH", None),
             file_access_time_threshold_minutes=float(
                 os.getenv(

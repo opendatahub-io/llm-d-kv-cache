@@ -67,7 +67,8 @@ graph TB
   - Discover cache files using flat fs_backend path layout
   - Filter files by hex modulo for load balancing
   - Check file access time (skip recently accessed files)
-  - Queue files for deletion
+  - Queue files for deletion, pausing the walk while the queue is at its target size
+  - Back off between sweeps that queue nothing (1s doubling to 60s)
   - Report statistics to main process
 
 **Load Balancing**: Each crawler handles a specific hex modulo range:
@@ -91,10 +92,11 @@ graph TB
 - **Responsibilities**:
   - Wait for `deletion_event` to be set
   - Dequeue files from file queue
-  - Batch delete files using `xargs rm -f`
+  - Delete each file with one `stat` and one `unlink`, skipping files accessed since they were queued
+  - Optionally pace deletions to `DELETION_MAX_FILES_PER_SECOND`
   - Report deletion progress to main process
 
-**Batch Deletion**: Groups files into batches (default 100) for efficient deletion using `xargs`.
+**Batch Deletion**: Groups files into batches (default 100) for progress reporting and storage events.
 
 ## Inter-Process Communication
 
@@ -162,9 +164,9 @@ result_queue = multiprocessing.Queue()  # All → Main
    - Batch files (default 100 per batch)
    - Use timeout to handle partial batches
 
-3. Batch delete using xargs
-   - Efficient system call usage
-   - Null-terminated input for safety
+3. Delete each file in the batch
+   - stat: skip files gone or accessed within the threshold since queueing
+   - unlink, paced to DELETION_MAX_FILES_PER_SECOND when set
 
 4. Report progress
    - Send statistics to main process
@@ -176,12 +178,13 @@ result_queue = multiprocessing.Queue()  # All → Main
 **When deletion is OFF**:
 - Crawlers pre-fill queue to MIN_SIZE (default 1000)
 - Allows fast deletion start when triggered
-- Crawlers continue discovering but don't queue beyond MIN_SIZE
+- Crawlers pause their walk once the queue holds MIN_SIZE entries, so an
+  idle evictor issues no filesystem operations beyond the activator's `statvfs()`
 
 **When deletion is ON**:
 - Crawlers fill queue up to MAX_SIZE (default 10000)
 - Deleter actively processes queue
-- Crawlers slow down if queue is full
+- Crawlers pause their walk while the queue is full
 
 ## Key Design Decisions
 
@@ -199,9 +202,9 @@ result_queue = multiprocessing.Queue()  # All → Main
 
 ### 3. Batch Deletion vs Individual Deletion
 
-**Decision**: Use batch deletion with `xargs rm -f`
+**Decision**: Unlink files individually from the deleter process, grouped into batches for reporting
 
-**Rationale**: Reduces system call overhead for faster deletion throughput. Configurable batch size allows tuning, and null-terminated input handles special characters safely.
+**Rationale**: `rm` issues one `unlink` per file either way, so forking `xargs rm` saved nothing and needed an extra `exists()`/`stat()` pass per file. On shared (RWX) storage every metadata operation competes with vLLM, so the deleter does one `stat` (size and atime re-check) and one `unlink` per file, optionally paced.
 
 ### 4. statvfs() vs du for Disk Usage
 
@@ -234,7 +237,7 @@ result_queue = multiprocessing.Queue()  # All → Main
 1. **Cache path missing**: Walker returns no files; crawler retries on the next loop
 2. **Malformed directories**: Skip and continue processing
 3. **File stat errors**: Skip file and continue
-4. **Batch deletion errors**: Log error, skip batch, retry in next cycle
+4. **File deletion errors**: Log error, skip the file, retry in next cycle
 5. **Process crashes**: Main process detects and restarts
 
 ### Shutdown Handling

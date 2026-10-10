@@ -24,6 +24,7 @@ All configuration is done through environment variables. These can be set direct
 | `FILE_QUEUE_MAXSIZE` | int | `10000` | > 0 | Max items in queue when deletion is ON |
 | `FILE_QUEUE_MIN_SIZE` | int | `1000` | > 0 | Pre-fill queue to this size when deletion is OFF |
 | `DELETION_BATCH_SIZE` | int | `100` | > 0 | Files per deletion batch (deleter process) |
+| `DELETION_MAX_FILES_PER_SECOND` | float | `0` | >= 0 | Max files the deleter stats and unlinks per second; `0` = unlimited |
 | `FILE_ACCESS_TIME_THRESHOLD_MINUTES` | float | `60.0` | >= 0 | Skip files accessed within this time (minutes) |
 
 ### Empty Directory Cleanup
@@ -67,6 +68,7 @@ config:
   fileQueueMaxsize: 10000
   fileQueueMinSize: 1000
   deletionBatchSize: 100
+  deletionMaxFilesPerSecond: 0
   fileAccessTimeThresholdMinutes: 60
   
   # Safety Configuration
@@ -94,6 +96,7 @@ DEFAULT_LOGGER_INTERVAL = 0.5
 DEFAULT_FILE_QUEUE_MAXSIZE = 10000
 DEFAULT_FILE_QUEUE_MIN_SIZE = 1000
 DEFAULT_DELETION_BATCH_SIZE = 100
+DEFAULT_DELETION_MAX_FILES_PER_SECOND = 0.0
 DEFAULT_FILE_ACCESS_TIME_THRESHOLD_MINUTES = 60.0
 ```
 
@@ -132,14 +135,21 @@ Monitor CPU usage and file discovery rates to optimize for your specific deploym
 ### Tuning Deletion Batch Size
 
 **DELETION_BATCH_SIZE**: Number of files deleted per batch
-- Higher values = fewer system calls, faster deletion
-- Lower values = more granular progress reporting
+- Controls how often progress and storage events are reported
 - Recommended: 100-1000 depending on file sizes
+
+### Tuning Deletion Rate
+
+**DELETION_MAX_FILES_PER_SECOND**: Upper bound on deleter metadata operations
+- Each file costs one `stat` and one `unlink` on the shared filesystem, competing with vLLM's own lookups and writes
+- Deletions are spaced evenly (no bursts); `0` disables the limit
+- Must exceed the rate at which vLLM creates files, or usage will keep climbing past the cleanup threshold
 
 ### Tuning Access Time Threshold
 
 **FILE_ACCESS_TIME_THRESHOLD_MINUTES**: Skip recently accessed files
 - Prevents deletion of "hot" cache files
+- Checked by crawlers when queueing and again by the deleter just before unlinking
 - **Important**: Requires filesystem with accurate atime tracking
 - **Warning**: Many filesystems use `relatime` which may not update atime on every access
 - Recommended: 60 minutes for most deployments

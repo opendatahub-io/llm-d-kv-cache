@@ -6,7 +6,6 @@ import logging
 import multiprocessing
 import os
 import re
-import subprocess
 import time
 from pathlib import Path
 from typing import Any
@@ -74,19 +73,46 @@ def extract_model_name(file_path: str, cache_path: str) -> str | None:
     return model_name
 
 
+class DeletionPacer:
+    """Spaces operations evenly at no more than max_per_second, with no burst; 0 disables pacing."""
+
+    def __init__(self, max_per_second: float, stop_event: Any = None):
+        self._interval = 1.0 / max_per_second if max_per_second > 0 else 0.0
+        self._stop_event = stop_event
+        self._next_slot = 0.0
+
+    def acquire(self) -> None:
+        if self._interval == 0.0:
+            return
+        now = time.monotonic()
+        slot = max(self._next_slot, now)
+        self._next_slot = slot + self._interval
+        delay = slot - now
+        if delay <= 0:
+            return
+        if self._stop_event is not None:
+            self._stop_event.wait(delay)
+        else:
+            time.sleep(delay)
+
+
 def delete_batch(
     file_paths: list[str],
     dry_run: bool,
     logger: logging.Logger,
     folder_queue: Any = None,
+    min_idle_seconds: float = 0.0,
+    pacer: DeletionPacer | None = None,
 ) -> tuple[int, int, list[str]]:
     """
-    Delete a batch of files using xargs rm -f (batch deletion).
+    Delete a batch of files with one stat and one unlink per file.
 
-    If xargs fails, logs error and skips the batch (files will be retried in next cycle).
+    Files accessed within min_idle_seconds are skipped: they were cold when a
+    crawler queued them but have been read since. Files that no longer exist
+    are skipped silently, and other errors are logged and skipped.
 
-    On success, the parent directory of each deleted file is offered to
-    folder_queue (if provided) so the folder cleaner can reap it once empty.
+    The parent directory of each deleted file is offered to folder_queue (if
+    provided) so the folder cleaner can reap it once empty.
 
     Returns: (files_deleted, bytes_freed, deleted_paths)
     """
@@ -94,67 +120,45 @@ def delete_batch(
         logger.debug(f"[DRY RUN] Would delete {len(file_paths)} files")
         return len(file_paths), 0, []
 
-    valid_paths = []
+    deleted_paths = []
     total_bytes = 0
+    skipped_hot = 0
 
-    # Validate paths and calculate total size
     for path_str in file_paths:
+        if pacer is not None:
+            pacer.acquire()
         try:
-            file_path = Path(path_str)
-            if file_path.exists():
-                stat = file_path.stat()
-                valid_paths.append(path_str)
-                total_bytes += stat.st_size
-        except Exception:
+            st = os.stat(path_str)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.debug(f"stat failed for {path_str}: {e}")
             continue
 
-    if not valid_paths:
-        # All files in batch don't exist (already deleted or invalid paths)
-        # This is normal - files may have been deleted between queuing and processing
-        # or the same files were queued multiple times
-        return 0, 0, []
+        if time.time() - st.st_atime < min_idle_seconds:
+            skipped_hot += 1
+            continue
 
-    # Use xargs rm -f for batch deletion
-    # Use null-terminated input for xargs -0 (safe handling of file paths with special characters)
-    try:
-        input_data = "\0".join(valid_paths).encode("utf-8")
-        result = subprocess.run(
-            ["xargs", "-0", "rm", "-f"],
-            input=input_data,
-            capture_output=True,
-            timeout=60,
-            check=False,
-        )
+        try:
+            os.unlink(path_str)
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.warning(f"unlink failed for {path_str}: {e}")
+            continue
 
-        if result.returncode == 0:
-            # Offer each freshly-emptied parent directory to the folder cleaner.
-            # We just removed these files, so the parent is a deletion candidate;
-            # os.rmdir in the cleaner is a no-op if another file lands there first.
-            if folder_queue is not None:
-                for parent in {str(Path(f).parent) for f in valid_paths}:
-                    with contextlib.suppress(Exception):
-                        folder_queue.put_nowait(parent)
-            return len(valid_paths), total_bytes, valid_paths
-        else:
-            # Log error and skip batch - files will be retried in next cycle
-            logger.error(
-                f"xargs rm failed (returncode={result.returncode}), skipping batch of {len(valid_paths)} files. "
-                f"Files will be retried in next cycle."
-            )
-            if result.stderr:
-                logger.debug(f"xargs stderr: {result.stderr.decode('utf-8', errors='ignore')}")
-            return 0, 0, []
-    except subprocess.TimeoutExpired:
-        logger.error(
-            f"xargs rm timed out, skipping batch of {len(valid_paths)} files. Files will be retried in next cycle."
-        )
-        return 0, 0, []
-    except Exception as e:
-        logger.error(
-            f"Batch deletion error: {e}, skipping batch of {len(valid_paths)} files. "
-            f"Files will be retried in next cycle."
-        )
-        return 0, 0, []
+        deleted_paths.append(path_str)
+        total_bytes += st.st_size
+
+    if skipped_hot:
+        logger.debug(f"Skipped {skipped_hot} files accessed since they were queued")
+
+    if folder_queue is not None:
+        for parent in {os.path.dirname(f) for f in deleted_paths}:
+            with contextlib.suppress(Exception):
+                folder_queue.put_nowait(parent)
+
+    return len(deleted_paths), total_bytes, deleted_paths
 
 
 def delete_file_batch(
@@ -169,6 +173,8 @@ def delete_file_batch(
     folder_queue: Any = None,
     event_publisher=None,
     cache_path=None,
+    min_idle_seconds: float = 0.0,
+    pacer: DeletionPacer | None = None,
 ) -> tuple[int, int, float]:
     """
     Process a batch of files for deletion and report progress to main process.
@@ -176,7 +182,14 @@ def delete_file_batch(
     Returns: (updated_total_files_deleted, updated_total_bytes_freed, batch_start_time)
     """
     batch_start_time = time.time()
-    deleted, freed, deleted_paths = delete_batch(batch, dry_run, logger, folder_queue=folder_queue)
+    deleted, freed, deleted_paths = delete_batch(
+        batch,
+        dry_run,
+        logger,
+        folder_queue=folder_queue,
+        min_idle_seconds=min_idle_seconds,
+        pacer=pacer,
+    )
 
     if deleted_paths and event_publisher is not None and cache_path is not None:
         model_hashes = {}
@@ -226,8 +239,14 @@ def deleter_process(
 
     batch_size = config_dict["deletion_batch_size"]
     dry_run = config_dict["dry_run"]
+    min_idle_seconds = config_dict.get("file_access_time_threshold_minutes", 0.0) * 60.0
+    max_files_per_second = config_dict.get("deletion_max_files_per_second", 0.0)
+    pacer = DeletionPacer(max_files_per_second, stop_event=shutdown_event)
 
-    logger.info(f"Deleter P{process_num} started - batch size: {batch_size}, dry_run: {dry_run}")
+    logger.info(
+        f"Deleter P{process_num} started - batch size: {batch_size}, dry_run: {dry_run}, "
+        f"max files/s: {max_files_per_second or 'unlimited'}"
+    )
 
     total_files_deleted = 0
     total_bytes_freed = 0
@@ -258,6 +277,25 @@ def deleter_process(
         except Exception:
             logger.warning("Failed to create storage event publisher", exc_info=True)
 
+    def flush_batch() -> None:
+        nonlocal total_files_deleted, total_bytes_freed, prev_batch_time, current_batch
+        total_files_deleted, total_bytes_freed, prev_batch_time = delete_file_batch(
+            current_batch,
+            dry_run,
+            logger,
+            process_id,
+            total_files_deleted,
+            total_bytes_freed,
+            prev_batch_time,
+            result_queue,
+            folder_queue,
+            event_publisher,
+            cache_path,
+            min_idle_seconds=min_idle_seconds,
+            pacer=pacer,
+        )
+        current_batch = []
+
     try:
         while not shutdown_event.is_set():
             # Only process when deletion is ON
@@ -271,20 +309,7 @@ def deleter_process(
 
                         # Delete batch when full
                         if len(current_batch) >= batch_size:
-                            total_files_deleted, total_bytes_freed, prev_batch_time = delete_file_batch(
-                                current_batch,
-                                dry_run,
-                                logger,
-                                process_id,
-                                total_files_deleted,
-                                total_bytes_freed,
-                                prev_batch_time,
-                                result_queue,
-                                folder_queue,
-                                event_publisher,
-                                cache_path,
-                            )
-                            current_batch = []
+                            flush_batch()
 
                     except Exception:
                         # Queue empty or timeout - check if we should process partial batch
@@ -309,20 +334,7 @@ def deleter_process(
                     )
 
                     if should_process_partial:
-                        total_files_deleted, total_bytes_freed, prev_batch_time = delete_file_batch(
-                            current_batch,
-                            dry_run,
-                            logger,
-                            process_id,
-                            total_files_deleted,
-                            total_bytes_freed,
-                            prev_batch_time,
-                            result_queue,
-                            folder_queue,
-                            event_publisher,
-                            cache_path,
-                        )
-                        current_batch = []
+                        flush_batch()
                         last_batch_check_time = current_time
 
                 except Exception as e:
@@ -342,19 +354,7 @@ def deleter_process(
 
         # Delete remaining batch on shutdown
         if current_batch:
-            total_files_deleted, total_bytes_freed, prev_batch_time = delete_file_batch(
-                current_batch,
-                dry_run,
-                logger,
-                process_id,
-                total_files_deleted,
-                total_bytes_freed,
-                prev_batch_time,
-                result_queue,
-                folder_queue,
-                event_publisher,
-                cache_path,
-            )
+            flush_batch()
 
     except Exception as e:
         logger.exception(f"Deleter P{process_num} error: {e}")
