@@ -1,0 +1,71 @@
+# Copyright 2025 The llm-d Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Build stage
+FROM --platform=$TARGETPLATFORM quay.io/aipcc/base-images/cpu:3.6 AS builder
+
+ARG TARGETPLATFORM
+
+WORKDIR /app
+
+USER root
+
+# Install runtime deps: msgpack + pyzmq for event publishing (#605)
+RUN pip install --no-cache-dir msgpack pyzmq
+
+# Runtime stage
+FROM --platform=$TARGETPLATFORM quay.io/aipcc/base-images/cpu:3.6 AS runtime
+
+WORKDIR /app
+
+# Copy installed dependencies from build stage (UBI uses /opt/app-root/)
+COPY --from=builder /opt/app-root/lib/python3.12/site-packages /opt/app-root/lib/python3.12/site-packages
+COPY --from=builder /opt/app-root/bin/ /opt/app-root/bin/
+
+USER root
+
+# llmd_fs_backend.event_publisher: required when STORAGE_EVENTS_ENDPOINT is set (#605 BlockRemoved).
+# Crawler discovery is path-only (#611) and does not import FileMapper/vLLM.
+# Build from kv_connectors/: podman build -f pvc_evictor/Dockerfile.konflux -t pvc-evictor:tag .
+RUN mkdir -p /app/llmd_fs_backend \
+    && printf '%s\n' '# Minimal package init for pvc_evictor event publishing.' > /app/llmd_fs_backend/__init__.py
+COPY llmd_fs_backend/llmd_fs_backend/event_publisher.py /app/llmd_fs_backend/event_publisher.py
+
+COPY pvc_evictor/config.py pvc_evictor/evictor.py ./
+COPY pvc_evictor/utils/ ./utils/
+COPY pvc_evictor/processes/ ./processes/
+
+RUN chown -R 65532:65532 /app
+
+# Add non-root user entry
+RUN echo "nonroot:x:65532:65532:nonroot:/home/nonroot:/usr/sbin/nologin" >> /etc/passwd && \
+    mkdir -p /home/nonroot && chown 65532:65532 /home/nonroot
+
+ENV PYTHONPATH="/app:${PYTHONPATH}"
+
+USER 65532:65532
+
+CMD ["python3", "evictor.py"]
+
+# Final stage
+FROM runtime
+
+LABEL com.redhat.component="odh-llm-d-kv-pvc-evictor-rhel9" \
+      name="odh-llm-d-kv-pvc-evictor-rhel9" \
+      description="odh-llm-d-kv-pvc-evictor" \
+      summary="odh-llm-d-kv-pvc-evictor" \
+      maintainer="['managed-open-data-hub@redhat.com']" \
+      io.k8s.display-name="odh-llm-d-kv-pvc-evictor" \
+      io.k8s.description="odh-llm-d-kv-pvc-evictor" \
+      com.redhat.license_terms="https://www.redhat.com/licenses/Red_Hat_Standard_EULA_20191108.pdf"
