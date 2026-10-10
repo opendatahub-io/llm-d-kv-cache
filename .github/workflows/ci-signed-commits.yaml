@@ -3,7 +3,30 @@ on: pull_request_target
 
 jobs:
   signed-commits:
-    uses: llm-d/llm-d-infra/.github/workflows/reusable-signed-commits.yaml@main
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
+
+    steps:
+      - name: Check for bot author
+        id: check-bot
+        run: |
+          PR_AUTHOR="${{ github.event.pull_request.user.login }}"
+          echo "PR author: $PR_AUTHOR"
+
+          # Allow unsigned commits from known bots
+          if [[ "$PR_AUTHOR" == "github-actions[bot]" ]] || \
+             [[ "$PR_AUTHOR" == "dependabot[bot]" ]] || \
+             [[ "$PR_AUTHOR" == *"[bot]" ]]; then
+            echo "is_bot=true" >> $GITHUB_OUTPUT
+            echo "Bot-authored PR detected - skipping signature check"
+          else
+            echo "is_bot=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check signed commits
+        if: steps.check-bot.outputs.is_bot != 'true'
+        uses: 1Password/check-signed-commits-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
