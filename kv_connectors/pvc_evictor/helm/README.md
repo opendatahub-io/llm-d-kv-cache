@@ -1,6 +1,6 @@
 # PVC Evictor Helm Chart
 
-This Helm chart deploys the PVC Evictor, a multi-process Kubernetes deployment that automatically manages disk space on PVCs used for vLLM KV-cache storage.
+This Helm chart deploys only the Python PVC Evictor implementation. It manages disk space on PVCs used for vLLM KV-cache storage. The Go implementation has a separate deployment path and is not deployed by this chart.
 
 ## Prerequisites
 

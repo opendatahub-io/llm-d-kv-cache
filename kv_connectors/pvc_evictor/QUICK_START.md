@@ -1,6 +1,6 @@
 # Quick Start Guide
 
-Deploy the PVC Evictor to automatically manage disk space on your vLLM KV-cache PVC.
+Deploy the Python PVC Evictor with Helm to automatically manage disk space on your vLLM KV-cache PVC. This guide does not cover deployment of the Go implementation.
 
 ## Prerequisites
 
