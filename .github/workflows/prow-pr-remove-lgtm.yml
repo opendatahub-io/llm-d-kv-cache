@@ -1,6 +1,10 @@
 name: Prow Remove LGTM
 on: pull_request
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   remove-lgtm:
-    uses: llm-d/llm-d-infra/.github/workflows/reusable-prow-remove-lgtm.yaml@main
+    uses: llm-d/llm-d-infra/.github/workflows/reusable-prow-remove-lgtm.yaml@991b7368b05664fdaa9788521e7482655323e0a4 # main

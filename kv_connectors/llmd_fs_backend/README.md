@@ -7,7 +7,7 @@
 > **The filesystem offloading logic is now upstreamed into vLLM** as the FS tier of the
 > **multi-tier offloading connector** (`TieringOffloadingSpec`). All new features, fixes,
 > and support continue there. See the
-> [vLLM KV offloading guide](https://github.com/vllm-project/vllm/pull/44415).
+> [vLLM KV offloading guide](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/).
 >
 > This repository remains available for the 0.23 release and earlier; the docs below
 > describe that final release.

@@ -4,10 +4,13 @@ import (
 	"context"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/kvblock"
+	"github.com/llm-d/llm-d-kv-cache/pkg/kvcache/metrics"
 	"github.com/llm-d/llm-d-kv-cache/pkg/utils/logging"
 )
 
@@ -834,4 +837,271 @@ func TestAllBlocksCleared_Dispatch(t *testing.T) {
 		require.Len(t, result[ck], 1, "only the surviving pod should remain on key %s", ck)
 		assert.Equal(t, "pod-kept", result[ck][0].PodIdentifier)
 	}
+}
+
+// TestPool_AllBlocksClearedResetsDedup verifies the filter is reset on
+// AllBlocksCleared, so a post-clear store/remove cycle behaves freshly rather
+// than carrying a stale reference that would suppress the remove. This is the
+// regression guard for p.dedup.clear(); TestAllBlocksCleared_Dispatch only
+// proves Index.Clear ran, not that the refcount state was reset.
+func TestPool_AllBlocksClearedResetsDedup(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 850)
+
+	storeTwice := func() {
+		for range 2 {
+			pool.processEventBatch(ctx, &EventBatch{
+				Events: []GenericEvent{
+					&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, ParentHash: 0},
+				},
+			}, "pod-clr", "test-model")
+		}
+	}
+
+	// Two stores -> reference count 2 -> would normally need two removes.
+	storeTwice()
+
+	// Clear wipes both the index and the dedup counts for the pod.
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{&AllBlocksClearedEvent{}},
+	}, "pod-clr", "test-model")
+
+	// Re-establish a single reference after the clear.
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, ParentHash: 0},
+		},
+	}, "pod-clr", "test-model")
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+
+	// A single remove must now fully evict: if the pre-clear count of 2 had
+	// survived, this remove would be suppressed and the blocks would linger.
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{&BlockRemovedEvent{BlockHashes: engineKeys}},
+	}, "pod-clr", "test-model")
+
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, result[ck], "single remove after clear must evict (dedup count was reset)")
+	}
+}
+
+// TestPool_DuplicateStoreSurvivesFirstRemove is the end-to-end proof through
+// processEventBatch with a real index: two overlapping chunks announce the same
+// blocks, so the first BlockRemoved must not evict them and the second must.
+func TestPool_DuplicateStoreSurvivesFirstRemove(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 800)
+
+	store := func() {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, ParentHash: 0},
+			},
+		}, "pod-dup", "test-model")
+	}
+	remove := func() {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockRemovedEvent{BlockHashes: engineKeys},
+			},
+		}, "pod-dup", "test-model")
+	}
+
+	store() // overlapping chunk A announces these constituent hashes
+	store() // overlapping chunk B re-announces the same hashes
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 4)
+
+	// First remove (chunk A evicted) must NOT drop the blocks.
+	remove()
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, result[ck], 1, "block must survive the first of two duplicate removes")
+	}
+
+	// Second remove (chunk B evicted) drops them.
+	remove()
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		assert.Empty(t, result[ck], "block must be evicted after the second duplicate remove")
+	}
+
+	// Engine->request mapping should also be gone after full eviction.
+	_, err = idx.GetRequestKey(ctx, kvblock.BlockHash(engineKeys[0]))
+	assert.Error(t, err, "engine->request mapping should be removed after the second remove")
+}
+
+// TestPool_DuplicateCPUOffloadRemovalSurvivesFirstRemove exercises the
+// offloading wiring end to end through processEventBatch: a CPU tier is
+// established via the empty-token device-tier update path, re-announced by two
+// overlapping chunks, and must require two CPU removes before the CPU entry is
+// evicted — while the independently reference-counted GPU entry (never removed)
+// is untouched throughout. This jointly exercises handleDeviceTierUpdate, the
+// deviceTier normalization on both store and remove, and the dedup scope.
+func TestPool_DuplicateCPUOffloadRemovalSurvivesFirstRemove(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, idx, tp := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 900)
+
+	// Step 1: GPU store with tokens establishes the engine->request mapping
+	// that the empty-token CPU offload path resolves against.
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, ParentHash: 0},
+		},
+	}, "pod-offload", "test-model")
+
+	// Step 2: the same CPU offload (empty tokens, "CPU" tier) announced twice,
+	// as two overlapping chunks would re-announce the shared constituent hashes.
+	cpuStore := func() {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockStoredEvent{BlockHashes: engineKeys, Tokens: nil, ParentHash: 0, DeviceTier: "CPU"},
+			},
+		}, "pod-offload", "test-model")
+	}
+	cpuStore()
+	cpuStore()
+
+	canonicalKeys, err := tp.TokensToKVBlockKeys(kvblock.EmptyBlockHash, tokens, "test-model", nil)
+	require.NoError(t, err)
+	require.Len(t, canonicalKeys, 4)
+
+	// Both gpu and cpu entries should now exist for each canonical key.
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, result[ck], 2, "gpu and cpu entries should both exist after offload")
+	}
+
+	cpuRemove := func() {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockRemovedEvent{BlockHashes: engineKeys, DeviceTier: "CPU"},
+			},
+		}, "pod-offload", "test-model")
+	}
+
+	// Step 3: the first CPU remove (one overlapping chunk evicted) must be
+	// suppressed — the cpu entry still has an outstanding reference.
+	cpuRemove()
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, result[ck], 2, "cpu entry must survive the first of two duplicate CPU removes")
+		tiers := map[string]bool{}
+		for _, pe := range result[ck] {
+			tiers[pe.DeviceTier] = true
+		}
+		assert.True(t, tiers["cpu"], "cpu entry should still be present after the first CPU remove")
+		assert.True(t, tiers["gpu"], "gpu entry should be untouched")
+	}
+
+	// Step 4: the second CPU remove releases the last reference and evicts the
+	// cpu entry; the gpu entry (never removed) must remain.
+	cpuRemove()
+	for _, ck := range canonicalKeys {
+		result, err := idx.Lookup(ctx, []kvblock.BlockHash{ck}, nil)
+		require.NoError(t, err)
+		require.Len(t, result[ck], 1, "only the gpu entry should remain after the second CPU remove")
+		assert.Equal(t, "gpu", result[ck][0].DeviceTier, "surviving entry must be the untouched gpu copy")
+	}
+}
+
+// TestPool_DeviceTierUpdateWithNoResolvedKeysDoesNotTrack pins the contract of
+// handleDeviceTierUpdate's bool return: a CPU offload for engine keys that were
+// never stored resolves nothing, so the store must NOT be reference-counted.
+// A subsequent remove then passes straight through (forwarded, not suppressed).
+func TestPool_DeviceTierUpdateWithNoResolvedKeysDoesNotTrack(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+
+	engineKeys := makeEngineKeys(4, 950) // never stored -> nothing resolves
+
+	// CPU offload (empty tokens) for unknown engine keys: handleDeviceTierUpdate
+	// returns false, so trackStore must not be called.
+	pool.processEventBatch(ctx, &EventBatch{
+		Events: []GenericEvent{
+			&BlockStoredEvent{BlockHashes: engineKeys, Tokens: nil, ParentHash: 0, DeviceTier: "CPU"},
+		},
+	}, "pod-noresolve", "test-model")
+
+	// The dedup filter must hold no references for these hashes, so a remove on
+	// the same scope passes through unchanged (nothing was tracked to suppress).
+	scope := blockScope{
+		podIdentifier:    "pod-noresolve",
+		deviceTier:       "cpu",
+		groupIdx:         noGroupIdx,
+		dataParallelRank: noDataParallelRank,
+	}
+	kept := pool.dedup.filterRemove(scope, engineKeys)
+	assert.Equal(t, engineKeys, kept,
+		"a device-tier update that resolved no keys must not be tracked; the remove passes through")
+}
+
+// TestPool_DedupMetricsCountBlockHashes verifies the dedup counters record the
+// number of constituent block hashes (not BlockRemoved events): two stores
+// establish refcount 2 over 4 hashes, so the first remove suppresses all 4 and
+// the second forwards all 4. The counters are process-wide globals, so the
+// assertions use deltas from a captured baseline.
+func TestPool_DedupMetricsCountBlockHashes(t *testing.T) {
+	ctx := logging.NewTestLoggerIntoContext(context.Background())
+	pool, _, _ := newTestPool(t, 16)
+
+	tokens := makeTokens(64)
+	engineKeys := makeEngineKeys(4, 990)
+
+	store := func() {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockStoredEvent{BlockHashes: engineKeys, Tokens: tokens, ParentHash: 0},
+			},
+		}, "pod-metrics", "test-model")
+	}
+	remove := func() {
+		pool.processEventBatch(ctx, &EventBatch{
+			Events: []GenericEvent{
+				&BlockRemovedEvent{BlockHashes: engineKeys},
+			},
+		}, "pod-metrics", "test-model")
+	}
+
+	suppressedBefore := counterValue(t, metrics.DedupRemovedHashesSuppressed)
+	forwardedBefore := counterValue(t, metrics.DedupRemovedHashesForwarded)
+
+	store()  // overlapping chunk A
+	store()  // overlapping chunk B -> refcount 2 for each of the 4 hashes
+	remove() // first remove: all 4 hashes suppressed (2 -> 1)
+	remove() // second remove: all 4 hashes forwarded (1 -> 0)
+
+	assert.Equal(t, 4.0, counterValue(t, metrics.DedupRemovedHashesSuppressed)-suppressedBefore,
+		"first of two duplicate removes must suppress all 4 constituent block hashes")
+	assert.Equal(t, 4.0, counterValue(t, metrics.DedupRemovedHashesForwarded)-forwardedBefore,
+		"second remove must forward all 4 constituent block hashes")
+}
+
+// counterValue reads the current value of a plain prometheus.Counter without
+// touching the global registry, using the same dto.Metric.Write pattern as
+// pkg/kvcache/metrics.logMetrics.
+func counterValue(t *testing.T, c prometheus.Counter) float64 {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, c.Write(&m))
+	return m.GetCounter().GetValue()
 }

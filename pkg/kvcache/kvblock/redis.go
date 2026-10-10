@@ -255,11 +255,11 @@ func (r *RedisIndex) Add(ctx context.Context, engineKeys, requestKeys []BlockHas
 	//   many:1 (4 eng, 1 req) -> E0->R0, E1->R0, E2->R0, E3->R0
 	//   1:many (1 eng, 4 req) -> E0->[R0, R1, R2, R3]
 	if engineKeys != nil {
-		n := max(len(engineKeys), len(requestKeys))
-		for i := 0; i < n; i++ {
-			ek := engineKeys[i*len(engineKeys)/n]
-			rk := requestKeys[i*len(requestKeys)/n]
-			pipe.ZAdd(ctx, redisEngineKey(ek), redis.Z{Score: float64(i), Member: rk.String()})
+		mappings := engineToRequestMapping(engineKeys, requestKeys)
+		for ek, rks := range mappings {
+			for j, rk := range rks {
+				pipe.ZAdd(ctx, redisEngineKey(ek), redis.Z{Score: float64(j), Member: rk.String()})
+			}
 		}
 	}
 

@@ -3,6 +3,10 @@ on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   gatekeeper:
-    uses: llm-d/llm-d-infra/.github/workflows/reusable-non-main-gatekeeper.yaml@main
+    uses: llm-d/llm-d-infra/.github/workflows/reusable-non-main-gatekeeper.yaml@991b7368b05664fdaa9788521e7482655323e0a4 # main

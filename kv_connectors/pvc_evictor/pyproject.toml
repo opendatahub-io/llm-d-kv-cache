@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pvc-evictor"
+version = "0.1.0"
+description = "PVC evictor for llm-d KV-cache offload storage"
+readme = "README.md"
+maintainers = [{ name = "llm-d community" }]
+requires-python = ">=3.12"
+# The evictor package imports no third-party runtime dependencies, so this is
+# empty. The image separately installs msgpack/pyzmq for the optional
+# STORAGE_EVENTS_ENDPOINT publishing path (llmd_fs_backend.event_publisher,
+# copied into the image); those are not imported by this package.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[tool.setuptools]
+py-modules = ["evictor", "config"]
+packages = ["processes", "utils"]

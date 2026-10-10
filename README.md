@@ -5,6 +5,15 @@
 
 # KV-Cache
 
+> [!IMPORTANT]
+> The **KV-Cache Indexer** — the `kvcache`, `kvblock`, and `kvevents` libraries
+> that power KV-cache-aware routing — has moved to
+> [llm-d-router](https://github.com/llm-d/llm-d-router)
+> ([llm-d/llm-d-router#1886](https://github.com/llm-d/llm-d-router/pull/1886)).
+> New development happens there. A few imports of deprecated modules remain in
+> this repository; once removed, no scheduling-related logic will live here. Open
+> PRs against these libraries should be replicated against llm-d-router.
+
 ### Introduction
 
 Efficiently caching Key & Value (KV) tensors is crucial for optimizing LLM inference. 
@@ -85,5 +94,5 @@ graph TD
 * [**llmd-fs-backend**](kv_connectors/llmd_fs_backend/README.md):
   Storage backend for vLLM's `OffloadingConnector` — moves KV-cache blocks between GPU and shared storage (local disk, shared filesystem, or object store). Pre-built wheels are published via the project's pip index; see the connector README for install instructions and configuration.
   > [!IMPORTANT]
-  > **Now upstreamed into vLLM.** `llmd-fs-connector==0.23` (llm-d v0.8 / vLLM v0.23) is the **final release** — llmd-fs-backend is now the FS tier of vLLM's multi-tier offloading connector (`TieringOffloadingSpec`). All new features and support continue there; see the [vLLM KV offloading guide](https://github.com/vllm-project/vllm/pull/44415).
+  > **Now upstreamed into vLLM.** `llmd-fs-connector==0.23` (llm-d v0.8 / vLLM v0.23) is the **final release** — llmd-fs-backend is now the FS tier of vLLM's multi-tier offloading connector (`TieringOffloadingSpec`). All new features and support continue there; see the [vLLM KV offloading guide](https://docs.vllm.ai/en/latest/features/kv_offloading_usage/).
 

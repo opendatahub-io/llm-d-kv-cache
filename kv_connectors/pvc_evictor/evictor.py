@@ -346,6 +346,32 @@ class PVCEvictor:
                         )
                         folder_cleaner_process_obj.start()
 
+                    # Check and restart crawler processes
+                    for i, crawler_proc in enumerate(crawler_processes):
+                        if not crawler_proc.is_alive():
+                            hex_range = hex_ranges[i]
+                            self.logger.error(
+                                f"Crawler P{i + 1} died (exitcode={crawler_proc.exitcode}), "
+                                f"restarting (hex %16 in [{hex_range[0]}, {hex_range[1]}])..."
+                            )
+                            crawler_processes[i] = multiprocessing.Process(
+                                target=crawler_process,
+                                args=(
+                                    i,
+                                    hex_range,
+                                    cache_path,
+                                    self.config_dict,
+                                    self.deletion_event,
+                                    self.deletion_queue,
+                                    self.result_queue,
+                                    self.shutdown_event,
+                                    self.folder_queue,
+                                ),
+                                name=f"Crawler-P{i + 1}",
+                            )
+                            crawler_processes[i].start()
+                            self.logger.info(f"Restarted crawler P{i + 1}")
+
                     time.sleep(1.0)
 
         except KeyboardInterrupt:
