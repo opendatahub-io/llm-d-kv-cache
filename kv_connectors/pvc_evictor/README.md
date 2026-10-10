@@ -4,9 +4,9 @@ Automatic disk space management for vLLM KV-cache storage on Kubernetes PVCs.
 
 ## Overview
 
-The PVC Evictor is a multi-process Kubernetes deployment designed to automatically manage disk space on PVCs used for vLLM KV-cache storage offloading. It monitors PVC disk usage and automatically deletes old cache files when configured thresholds are exceeded, enabling continuous vLLM operation while resolving storage capacity exhaustion without manual intervention.
+The PVC Evictor provides two implementations for automatically managing disk space on PVCs used for vLLM KV-cache storage offloading. The Helm chart deploys only the Python implementation. The Go implementation is built and deployed separately, without Helm.
 
-## Quick Start
+## Quick Start: Python implementation with Helm
 
 The chart defaults to the latest PVC Evictor image:
 
@@ -28,50 +28,15 @@ See [QUICK_START.md](QUICK_START.md) for detailed deployment instructions.
 
 ## Architecture
 
-The evictor uses an **N+2 process architecture** where N parallel crawler processes discover cache files, while two dedicated processes (activator and deleter) coordinate and execute the deletion workflow.
+The repository contains two implementations:
 
-### Architecture Diagram
+- The legacy Python implementation uses separate operating-system processes.
+- The Go implementation uses one operating-system process with supervised goroutines.
 
-```mermaid
-graph TB
-    subgraph "PVC Evictor Pod"
-        Main[Main Process<br/>evictor.py]
-        
-        subgraph "Crawler Processes"
-            C1[Crawler 1<br/>hex range: 0-1]
-            ...
-            CN[Crawler N<br/>hex range: E-F]
-        end
-        
-        Act[Activator Process<br/>monitors disk usage]
-        Del[Deleter Process<br/>batch deletion]
-        
-        Queue[multiprocessing.Queue<br/>file paths FIFO]
-        DelEvent[deletion_event<br/>Event flag]
-    end
-    
-    PVC[PVC Mount<br/>/kv-cache]
-    
-    Main -->|spawns & monitors| C1
-    Main -->|spawns & monitors| CN
-    Main -->|spawns & monitors| Act
-    Main -->|spawns & monitors| Del
-    
-    C1 -..->|scan files| PVC
-    CN -..->|scan files| PVC
-    
-    C1 -->|put file paths| Queue
-    CN -->|put file paths| Queue
-    
-    Act -..->|check usage| PVC
-    Act -->|set/clear| DelEvent
-    
-    Del -->|get file paths| Queue
-    Del -->|check flag| DelEvent
-    Del -..->|delete files| PVC
-```
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the legacy Python and Go
+architecture diagrams.
 
-### Process Roles
+### Python Process Roles
 
 - **N Crawler Processes** - Discover and queue files for deletion (N configurable: 1, 2, 4, 8, or 16, default: 8)
 - **Activator Process** - Monitors disk usage and controls deletion triggers
@@ -187,14 +152,19 @@ pip install -r requirements-dev.txt
 make test
 ```
 
+`make test` and `make docker-build` are for the Python implementation used by Helm. Run `make test_go` and `make docker-build_go` for the separate Go implementation; the Go image is not deployed by this Helm chart.
+
 Build image (from `kv_connectors/`):
 
 ```bash
-make docker-build
+make docker-build       # Python image
+make docker-build_go    # Go image
 ```
 
-By default, this builds `quay.io/pvc-evictor/pvc-evictor:latest`.
-Override the target when testing a local or development tag:
+By default, `make docker-build` builds `quay.io/pvc-evictor/pvc-evictor:latest`
+and `make docker-build_go` builds `quay.io/pvc-evictor/pvc-evictor-go:latest`.
+Override the target when testing a local or development tag
+(use `GO_IMAGE_REPOSITORY` for the Go image):
 
 ```bash
 make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm-d-v0.8

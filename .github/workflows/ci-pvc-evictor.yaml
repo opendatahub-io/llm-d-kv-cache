@@ -4,11 +4,13 @@ on:
   pull_request:
     paths:
       - 'kv_connectors/pvc_evictor/**'
+      - '.github/workflows/ci-pvc-evictor.yaml'
   push:
     branches:
       - main
     paths:
       - 'kv_connectors/pvc_evictor/**'
+      - '.github/workflows/ci-pvc-evictor.yaml'
 
 jobs:
   test:
@@ -23,3 +25,14 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements-dev.txt
       - run: pytest tests/ -v
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: kv_connectors/pvc_evictor/go/go.mod
+          cache-dependency-path: kv_connectors/pvc_evictor/go/go.sum
+      - name: Test Go implementation
+        run: go test ./...
+        working-directory: kv_connectors/pvc_evictor/go
+      - name: Build Go implementation
+        run: go build -o /tmp/pvc-evictor ./cmd/pvc-evictor
+        working-directory: kv_connectors/pvc_evictor/go
