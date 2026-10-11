@@ -142,6 +142,39 @@ func TestFlushReportsDeletedFilesWhenStoppedMidBatch(t *testing.T) {
 	}
 }
 
+func TestFlushStopsBeforeDeletingWhenContextIsAlreadyCancelled(t *testing.T) {
+	root := t.TempDir()
+	bucket := filepath.Join(root, "cache", "model_r0", "abc", "de_g0")
+	if err := os.MkdirAll(bucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(bucket, "0000000000000001.bin")
+	second := filepath.Join(bucket, "0000000000000002.bin")
+	for _, path := range []string{first, second} {
+		if err := os.WriteFile(path, []byte("cache"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The default rate is unlimited, so acquisition must still honor the
+	// canceled context before either file is deleted.
+	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache"}
+	deleter := New(cfg, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	deleter.flush(ctx, []string{first, second}, make(chan string, 1), slog.New(slog.DiscardHandler))
+
+	for _, path := range []string{first, second} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("file was removed after cancellation: %v", err)
+		}
+	}
+	if deleter.filesDeleted.Load() != 0 {
+		t.Fatalf("deleted count = %d, want 0", deleter.filesDeleted.Load())
+	}
+}
+
 func TestModelName(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, "cache", "model_digest_r0"), 0o750); err != nil {

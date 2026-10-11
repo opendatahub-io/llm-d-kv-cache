@@ -203,6 +203,9 @@ func intervalForRate(maxFilesPerSecond float64) time.Duration {
 }
 
 func (p *deletionPacer) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if p.interval == 0 {
 		return nil
 	}

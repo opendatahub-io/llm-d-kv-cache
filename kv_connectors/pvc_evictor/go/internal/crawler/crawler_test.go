@@ -145,6 +145,52 @@ func TestScanOffersEmptyFirstBucketOnlyToOwner(t *testing.T) {
 	}
 }
 
+func TestScanOffersEmptyFlatRankDirectoryOnceAcrossCrawlers(t *testing.T) {
+	root := t.TempDir()
+	rankDir := filepath.Join(root, "cache", "model_digest_r17")
+	if err := os.MkdirAll(rankDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		PVCMountPath:     root,
+		CacheDirectory:   "cache",
+		FileQueueMaxSize: 10,
+		HexBucketLen:     3,
+		DirCleanupTTL:    0,
+	}
+	folderQueue := make(chan string, 8)
+	stats := Stats{}
+
+	for _, moduloRange := range HexModuloRanges(8) {
+		if err := scan(
+			context.Background(),
+			cfg,
+			filepath.Join(root, "cache"),
+			moduloRange,
+			&atomic.Bool{},
+			make(chan string, 10),
+			folderQueue,
+			&stats,
+			slog.New(slog.DiscardHandler),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := <-folderQueue; got != rankDir {
+		t.Fatalf("queued %q, want %q", got, rankDir)
+	}
+	select {
+	case path := <-folderQueue:
+		t.Fatalf("queued duplicate empty rank directory: %q", path)
+	default:
+	}
+	if stats.EmptyDirs != 1 {
+		t.Fatalf("queued %d empty dirs across crawlers, want 1", stats.EmptyDirs)
+	}
+}
+
 func TestNextRescanDelay(t *testing.T) {
 	tests := []struct {
 		previous time.Duration

@@ -117,7 +117,10 @@ func scan(
 			return nil
 		}
 
-		if containsHexBucket(path) {
+		// An empty flat rank directory has no hex bucket, but it still needs
+		// to be offered to the folder cleaner. Directories with hex buckets
+		// keep the existing recursive-layout support.
+		if _, ok := flatRankModulo(path); ok || containsHexBucket(path) {
 			processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, stats)
 			return fs.SkipDir
 		}
@@ -198,6 +201,9 @@ func processRankDir(
 		}
 	}
 	if !hasFirstBucket {
+		if modulo, ok := flatRankModulo(rankPath); ok && (modulo < moduloRange[0] || modulo > moduloRange[1]) {
+			return
+		}
 		offerFolder(ctx, folderQueue, rankPath, cfg.DirCleanupTTL, stats)
 	}
 }
@@ -307,6 +313,19 @@ func containsHexBucket(path string) bool {
 		}
 	}
 	return false
+}
+
+func flatRankModulo(path string) (int, bool) {
+	name := filepath.Base(path)
+	prefixIndex := strings.LastIndex(name, "_r")
+	if prefixIndex <= 0 || prefixIndex+2 == len(name) {
+		return 0, false
+	}
+	rank, err := strconv.ParseUint(name[prefixIndex+2:], 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return int(rank % hexModuloBase), true
 }
 
 func isEmptyDir(path string) bool {
