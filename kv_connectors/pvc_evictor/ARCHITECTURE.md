@@ -9,7 +9,7 @@ The PVC Evictor has two implementations:
 - The legacy Python implementation is a multi-process application.
 - The Go implementation is a single-process application using supervised goroutines.
 
-The Helm chart deploys only the Python implementation. The Go implementation is a separate build and deployment path and is not deployed by Helm.
+The Helm chart deploys only the Python implementation. The Go implementation is a separate build and deployment path using the manifests in [deploy/](deploy/).
 
 ## Legacy Python Process Architecture
 

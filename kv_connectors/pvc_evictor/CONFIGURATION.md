@@ -24,7 +24,6 @@ The Python implementation reads environment variables. In the Helm deployment, t
 | `FILE_QUEUE_MAXSIZE` | int | `10000` | > 0 | Max items in queue when deletion is ON |
 | `FILE_QUEUE_MIN_SIZE` | int | `1000` | > 0 | Pre-fill queue to this size when deletion is OFF |
 | `DELETION_BATCH_SIZE` | int | `100` | > 0 | Files per deletion batch (deleter process) |
-| `DELETION_MAX_FILES_PER_SECOND` | float | `0` | >= 0 | Max files the deleter stats and unlinks per second; `0` = unlimited |
 | `FILE_ACCESS_TIME_THRESHOLD_MINUTES` | float | `60.0` | >= 0 | Skip files accessed within this time (minutes) |
 
 ### Empty Directory Cleanup
@@ -38,6 +37,10 @@ The crawler and deleter discover empty directories and hand them to the
 folder cleaner, which removes them with `os.rmdir` (a no-op if a file lands
 in the directory first). Set `ENABLE_DIR_CLEANUP=false` to disable the
 process entirely.
+
+`DELETION_MAX_FILES_PER_SECOND` is a Go-only setting. Configure it in
+`kv_connectors/pvc_evictor/deploy/configmap.env`; it is not read by the
+Python implementation or its Helm chart.
 
 ### Safety Configuration
 

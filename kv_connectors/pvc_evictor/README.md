@@ -4,7 +4,7 @@ Automatic disk space management for vLLM KV-cache storage on Kubernetes PVCs.
 
 ## Overview
 
-The PVC Evictor provides two implementations for automatically managing disk space on PVCs used for vLLM KV-cache storage offloading. The Helm chart deploys only the Python implementation. The Go implementation is built and deployed separately, without Helm.
+The PVC Evictor provides two implementations for automatically managing disk space on PVCs used for vLLM KV-cache storage offloading. The Helm chart deploys the Python implementation. The Go implementation is built separately and deploys with the manifests in [deploy/](deploy/).
 
 ## Quick Start: Python implementation with Helm
 
@@ -25,6 +25,20 @@ helm install pvc-evictor ./helm \
 ```
 
 See [QUICK_START.md](QUICK_START.md) for detailed deployment instructions.
+
+## Quick Start: Go implementation with Kubernetes manifests
+
+Replace the existing shared PVC name in
+[deploy/deployment.yaml](deploy/deployment.yaml) and the target namespace in
+[deploy/kustomization.yaml](deploy/kustomization.yaml), then apply the
+manifests:
+
+```bash
+kubectl apply -k deploy/
+```
+
+The default Go image is
+`quay.io/opendatahub/llm-d-kv-cache:odh-stable-go`.
 
 ## Architecture
 
@@ -98,7 +112,7 @@ Key settings (see [CONFIGURATION.md](CONFIGURATION.md) for complete reference):
 | `cacheDirectory` | `kv/model-cache/models` | Cache path relative to PVC mount |
 | `fileAccessTimeThresholdMinutes` | 60 | Protect files accessed within N minutes |
 
-## Monitoring
+## Python monitoring
 
 ### Log Patterns
 
@@ -135,6 +149,13 @@ kubectl logs -f deployment/pvc-evictor-pvc-evictor
 kubectl logs -f deployment/pvc-evictor-pvc-evictor
 ```
 
+For the Go deployment, use its namespace and name:
+
+```bash
+NAMESPACE=my-namespace
+kubectl logs -f deployment/llm-d-kv-cache-pvc-evictor -n "$NAMESPACE"
+```
+
 ## On-disk cache layout
 
 Crawlers discover `.bin` files under the flat layout used by llmd_fs_backend (v0.20+). The crawler does not import vLLM or FileMapper. The image still bundles `llmd_fs_backend` for optional storage events when `STORAGE_EVENTS_ENDPOINT` is set (see #605).
@@ -157,22 +178,25 @@ make test
 project with its `dev` extra (`pip install -e ".[dev]"`) before running the
 suite.
 
-`make test` and `make docker-build` are for the Python implementation used by Helm. Run `make test_go` and `make docker-build_go` for the separate Go implementation; the Go image is not deployed by this Helm chart.
+`make test` and `make docker-build` are for the Python implementation used by Helm. Run `make test_go` and `make docker-build_go` for the Go implementation deployed by [deploy/](deploy/).
+The Go implementation builds only on Linux, because it reads file and filesystem metadata with Linux system calls. On macOS or Windows, build and test it in a Linux container.
 
-Build image (from `kv_connectors/`):
+Build images from `kv_connectors/pvc_evictor/`:
 
 ```bash
+cd kv_connectors/pvc_evictor
 make docker-build       # Python image
 make docker-build_go    # Go image
 ```
 
 By default, `make docker-build` builds `quay.io/pvc-evictor/pvc-evictor:latest`
-and `make docker-build_go` builds `quay.io/pvc-evictor/pvc-evictor-go:latest`.
-Override the target when testing a local or development tag
-(use `GO_IMAGE_REPOSITORY` for the Go image):
+and `make docker-build_go` builds
+`quay.io/opendatahub/llm-d-kv-cache:latest`.
+Override the targets when testing local or development tags:
 
 ```bash
 make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm-d-v0.8
+make docker-build_go GO_IMAGE_REPOSITORY=quay.io/opendatahub/llm-d-kv-cache GO_IMAGE_TAG=odh-pr-go-abcdef1
 ```
 
 ## Documentation
@@ -180,6 +204,7 @@ make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm
 - **[QUICK_START.md](QUICK_START.md)** - Deployment guide
 - **[CONFIGURATION.md](CONFIGURATION.md)** - Complete configuration reference
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture and design
+- **[deploy/](deploy/)** - Go deployment manifests
 - **[helm/README.md](helm/README.md)** - Helm chart documentation
 
 ## Requirements

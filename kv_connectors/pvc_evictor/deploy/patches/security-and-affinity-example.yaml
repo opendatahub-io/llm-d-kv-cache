@@ -1,0 +1,24 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-d-kv-cache-pvc-evictor
+spec:
+  template:
+    spec:
+      securityContext:
+        # Replace these values with the IDs used by the vLLM workload.
+        runAsUser: 1000960000
+        runAsGroup: 1000960000
+        fsGroup: 1000960000
+        fsGroupChangePolicy: OnRootMismatch
+        seLinuxOptions:
+          # Replace with the SELinux level assigned to the vLLM workload.
+          level: s0:c31,c15
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels:
+                # Replace with a label on the vLLM Pod.
+                app.kubernetes.io/name: vllm
+            topologyKey: kubernetes.io/hostname
