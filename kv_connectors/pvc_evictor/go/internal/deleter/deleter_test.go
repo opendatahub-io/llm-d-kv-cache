@@ -41,6 +41,110 @@ func TestFlushDeletesFileAndQueuesParent(t *testing.T) {
 	}
 }
 
+func TestFlushDoesNotQueueRecentlyModifiedParent(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache", "model_r0", "abc", "de_g0", "0000000000000000.bin")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		PVCMountPath:            root,
+		CacheDirectory:          "cache",
+		DirCleanupTTL:           time.Hour,
+		FileAccessTimeThreshold: 0,
+	}
+	deleter := New(cfg, nil)
+	folderQueue := make(chan string, 1)
+	deleter.flush(context.Background(), []string{filePath}, folderQueue, slog.New(slog.DiscardHandler))
+
+	select {
+	case parent := <-folderQueue:
+		t.Fatalf("queued recently modified parent %q", parent)
+	default:
+	}
+}
+
+func TestFlushQueuesOldParentBeforeDeletionUpdatesMtime(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "cache", "model_r0", "abc", "de_g0")
+	filePath := filepath.Join(parent, "0000000000000000.bin")
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(parent, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		PVCMountPath:            root,
+		CacheDirectory:          "cache",
+		DirCleanupTTL:           time.Minute,
+		FileAccessTimeThreshold: 0,
+	}
+	deleter := New(cfg, nil)
+	folderQueue := make(chan string, 1)
+	deleter.flush(context.Background(), []string{filePath}, folderQueue, slog.New(slog.DiscardHandler))
+
+	select {
+	case got := <-folderQueue:
+		if got != parent {
+			t.Fatalf("queued parent %q, want %q", got, parent)
+		}
+	default:
+		t.Fatal("old parent was not queued")
+	}
+}
+
+// Deleting the first file updates the mtime of the directory. The second file
+// of the same batch must still use the mtime from before the batch.
+func TestFlushQueuesOldParentOnceForSeveralFiles(t *testing.T) {
+	root := t.TempDir()
+	parent := filepath.Join(root, "cache", "model_r0", "abc", "de_g0")
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	batch := make([]string, 0, 2)
+	for _, name := range []string{"0000000000000000.bin", "0000000000000001.bin"} {
+		filePath := filepath.Join(parent, name)
+		if err := os.WriteFile(filePath, []byte("cache"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		batch = append(batch, filePath)
+	}
+	old := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(parent, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		PVCMountPath:            root,
+		CacheDirectory:          "cache",
+		DirCleanupTTL:           time.Minute,
+		FileAccessTimeThreshold: 0,
+	}
+	deleter := New(cfg, nil)
+	folderQueue := make(chan string, 2)
+	deleter.flush(context.Background(), batch, folderQueue, slog.New(slog.DiscardHandler))
+
+	if got := deleter.filesDeleted.Load(); got != 2 {
+		t.Fatalf("deleted %d files, want 2", got)
+	}
+	if got := len(folderQueue); got != 1 {
+		t.Fatalf("queued %d parents, want 1", got)
+	}
+	if got := <-folderQueue; got != parent {
+		t.Fatalf("queued parent %q, want %q", got, parent)
+	}
+}
+
 func TestFlushDryRunKeepsFile(t *testing.T) {
 	root := t.TempDir()
 	filePath := filepath.Join(root, "cache", "model_r0", "abc", "de_g0", "0000000000000000.bin")

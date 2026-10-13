@@ -116,6 +116,15 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 
 	events := make(map[string][]uint64)
 	parents := make(map[string]struct{})
+	// parentModTimes holds the mtime each parent directory had before this
+	// batch deleted anything from it. Deleting a file updates the mtime of its
+	// directory, so the value must be read before the first deletion. Reading
+	// it once per directory also saves one stat call per file.
+	//
+	// If the files of one directory are split over two batches, the later batch
+	// sees the mtime the earlier batch left behind and does not queue the
+	// directory. The crawler removes it on a later sweep.
+	parentModTimes := make(map[string]time.Time)
 	var filesDeleted uint64
 	var bytesFreed uint64
 
@@ -135,6 +144,13 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 		if time.Since(info.AccessTime) < d.cfg.FileAccessTimeThreshold {
 			continue
 		}
+		parent := ""
+		if folderQueue != nil {
+			parent = filepath.Dir(path)
+			if _, seen := parentModTimes[parent]; !seen && d.cfg.DirCleanupTTL > 0 {
+				parentModTimes[parent] = filemeta.DirModTime(parent)
+			}
+		}
 		if err := os.Remove(path); err != nil {
 			if !os.IsNotExist(err) {
 				logger.Warn("Cannot delete cache file", slog.String("path", path), slog.Any("error", err))
@@ -147,8 +163,8 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 			continue
 		}
 		bytesFreed += uint64(info.Size) //nolint:gosec // size is checked as non-negative.
-		if folderQueue != nil {
-			parents[filepath.Dir(path)] = struct{}{}
+		if folderQueue != nil && filemeta.DirCleanupDue(parentModTimes[parent], time.Now(), d.cfg.DirCleanupTTL) {
+			parents[parent] = struct{}{}
 		}
 
 		if d.publisher != nil {

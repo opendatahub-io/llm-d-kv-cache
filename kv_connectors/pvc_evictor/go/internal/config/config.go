@@ -144,7 +144,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("CACHE_DIRECTORY must not be empty")
 	}
 	cleanCacheDirectory := filepath.Clean(c.CacheDirectory)
-	if filepath.IsAbs(c.CacheDirectory) || cleanCacheDirectory == "." || cleanCacheDirectory == ".." || strings.HasPrefix(cleanCacheDirectory, ".."+string(filepath.Separator)) {
+	if filepath.IsAbs(c.CacheDirectory) ||
+		cleanCacheDirectory == "." ||
+		cleanCacheDirectory == ".." ||
+		strings.HasPrefix(cleanCacheDirectory, ".."+string(filepath.Separator)) {
 		return fmt.Errorf("CACHE_DIRECTORY must be a relative subdirectory of PVC_MOUNT_PATH, got %q", c.CacheDirectory)
 	}
 	if math.IsNaN(c.CleanupThreshold) || math.IsInf(c.CleanupThreshold, 0) {
@@ -220,9 +223,23 @@ func envInt(name string, fallback int) (int, error) {
 	if value == "" {
 		return fallback, nil
 	}
+	if parsed, err := strconv.Atoi(value); err == nil {
+		return parsed, nil
+	}
+
+	// Accept whole numbers written as 8.0 or 1e+06. The Python evictor accepts
+	// them, and Helm renders large numbers in that form.
 	parsed, err := strconv.ParseFloat(value, 64)
 	if err != nil {
 		return 0, err
+	}
+	if math.IsNaN(parsed) || math.IsInf(parsed, 0) || parsed != math.Trunc(parsed) {
+		return 0, fmt.Errorf("%q is not a whole number", value)
+	}
+	// Above 2^53 a float64 cannot hold every whole number exactly.
+	const maxExactFloat = 1 << 53
+	if math.Abs(parsed) > maxExactFloat {
+		return 0, fmt.Errorf("%q is out of range", value)
 	}
 	return int(parsed), nil
 }

@@ -1,14 +1,11 @@
+//go:build linux
+
 package filemeta
 
 import (
 	"syscall"
 	"time"
 )
-
-type Info struct {
-	AccessTime time.Time
-	Size       int64
-}
 
 func Stat(path string) (Info, error) {
 	var stat syscall.Stat_t

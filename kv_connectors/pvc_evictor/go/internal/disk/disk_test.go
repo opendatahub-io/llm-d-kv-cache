@@ -1,3 +1,5 @@
+//go:build linux
+
 package disk_test
 
 import (

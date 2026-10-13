@@ -26,6 +26,18 @@ func TestUsageFromBlocksRejectsBadBlockSize(t *testing.T) {
 	}
 }
 
+func TestUsageFromBlocksRejectsFreeBlocksAboveTotal(t *testing.T) {
+	if _, err := usageFromBlocks(4096, 100, 101); err == nil {
+		t.Fatal("expected an error when free blocks exceed total blocks")
+	}
+}
+
+func TestUsageFromBlocksRejectsByteOverflow(t *testing.T) {
+	if _, err := usageFromBlocks(4096, ^uint64(0), 0); err == nil {
+		t.Fatal("expected an error when byte totals overflow")
+	}
+}
+
 func TestUsageFromBlocksEmptyFilesystem(t *testing.T) {
 	usage, err := usageFromBlocks(4096, 0, 0)
 	if err != nil {

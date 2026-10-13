@@ -17,6 +17,50 @@ func TestFromEnvInvalidNumber(t *testing.T) {
 	}
 }
 
+func TestEnvIntRejectsNonIntegerValues(t *testing.T) {
+	for _, value := range []string{"1.5", "NaN", "+Inf", "-Inf"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TEST_INTEGER", value)
+			if _, err := envInt("TEST_INTEGER", 1); err == nil {
+				t.Fatalf("expected an error for %q", value)
+			}
+		})
+	}
+}
+
+func TestEnvIntAcceptsWholeNumbers(t *testing.T) {
+	tests := map[string]int{
+		"8":     8,
+		"8.0":   8,
+		"1e+06": 1_000_000,
+		"1e6":   1_000_000,
+		"-3.0":  -3,
+	}
+	for value, want := range tests {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TEST_INTEGER", value)
+			got, err := envInt("TEST_INTEGER", 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got != want {
+				t.Fatalf("envInt(%q) = %d, want %d", value, got, want)
+			}
+		})
+	}
+}
+
+func TestEnvIntRejectsOutOfRangeValues(t *testing.T) {
+	for _, value := range []string{"1e30", "-1e30", "99999999999999999999"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("TEST_INTEGER", value)
+			if _, err := envInt("TEST_INTEGER", 1); err == nil {
+				t.Fatalf("expected an error for %q", value)
+			}
+		})
+	}
+}
+
 func TestFromEnvInvalidDeletionRate(t *testing.T) {
 	t.Setenv("PVC_MOUNT_PATH", "/cache")
 	t.Setenv("CACHE_DIRECTORY", "models")

@@ -285,11 +285,8 @@ func offerFolder(ctx context.Context, folderQueue chan<- string, path string, tt
 	if folderQueue == nil {
 		return
 	}
-	if ttl > 0 {
-		info, err := os.Stat(path)
-		if err != nil || time.Since(info.ModTime()) < ttl {
-			return
-		}
+	if ttl > 0 && !filemeta.DirCleanupDue(filemeta.DirModTime(path), time.Now(), ttl) {
+		return
 	}
 	select {
 	case folderQueue <- path:
