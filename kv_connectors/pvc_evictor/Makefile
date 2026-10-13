@@ -1,8 +1,8 @@
 IMAGE_REPOSITORY ?= quay.io/pvc-evictor/pvc-evictor
 IMAGE_TAG ?= latest
-# The Go image uses its own repository so it never overwrites the Python
-# image that the Helm chart deploys.
-GO_IMAGE_REPOSITORY ?= quay.io/pvc-evictor/pvc-evictor-go
+# Use a separate tag when building the Go image so it can share the ODH
+# repository with the Python image.
+GO_IMAGE_REPOSITORY ?= quay.io/opendatahub/llm-d-kv-cache
 
 PYTHON_EXE := $(shell command -v python3.12 || command -v python3)
 VENV_DIR := .venv
