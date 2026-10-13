@@ -1,8 +1,8 @@
 IMAGE_REPOSITORY ?= quay.io/pvc-evictor/pvc-evictor
 IMAGE_TAG ?= latest
-# Use a separate tag when building the Go image so it can share the ODH
-# repository with the Python image.
+# The Go image uses its own repository and tag variables.
 GO_IMAGE_REPOSITORY ?= quay.io/opendatahub/llm-d-kv-cache
+GO_IMAGE_TAG ?= latest
 
 PYTHON_EXE := $(shell command -v python3.12 || command -v python3)
 VENV_DIR := .venv
@@ -28,4 +28,4 @@ docker-build:
 	cd .. && podman build -f pvc_evictor/Dockerfile -t $(IMAGE_REPOSITORY):$(IMAGE_TAG) .
 
 docker-build_go:
-	cd go && podman build -t $(GO_IMAGE_REPOSITORY):$(IMAGE_TAG) .
+	cd go && podman build -t $(GO_IMAGE_REPOSITORY):$(GO_IMAGE_TAG) .
