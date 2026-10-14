@@ -25,9 +25,9 @@ spec:
   - name: output-image
     value: quay.io/opendatahub/odh-llm-d-kv-pvc-evictor:odh-pr
   - name: dockerfile
-    value: Dockerfile
+    value: pvc_evictor/Dockerfile.konflux
   - name: path-context
-    value: kv_connectors/pvc_evictor/
+    value: kv_connectors/
   #add these additional params
   - name: additional-tags
     value:

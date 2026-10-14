@@ -13,9 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM --platform=$TARGETPLATFORM quay.io/aipcc/base-images/cpu:3.6 AS builder
-
-ARG TARGETPLATFORM
+FROM quay.io/aipcc/base-images/cpu-el9.8:3.6.0-ea.2-1791826724@sha256:501370c1183fc16239e7d157f3c907d8ee9f8683d6e07e422b22c79b9adab01e AS builder
 
 WORKDIR /app
 
@@ -25,7 +23,7 @@ USER root
 RUN pip install --no-cache-dir msgpack pyzmq
 
 # Runtime stage
-FROM --platform=$TARGETPLATFORM quay.io/aipcc/base-images/cpu:3.6 AS runtime
+FROM quay.io/aipcc/base-images/cpu-el9.8:3.6.0-ea.2-1791826724@sha256:501370c1183fc16239e7d157f3c907d8ee9f8683d6e07e422b22c79b9adab01e AS runtime
 
 WORKDIR /app
 
