@@ -261,11 +261,11 @@ result_queue = multiprocessing.Queue()  # All → Main
 
 **Rationale**: Reduces system call overhead for faster deletion throughput. Configurable batch size allows tuning, and null-terminated input handles special characters safely.
 
-### 4. statvfs() vs du for Disk Usage
+### 4. statfs() vs du for Disk Usage
 
-**Decision**: Use `statvfs()` for disk usage monitoring
+**Decision**: Use `statfs()` for Go disk usage monitoring
 
-**Rationale**: O(1) operation provides instant results on multi-TB volumes, while `du` would take hours. Trade-off of less accuracy is acceptable for threshold-based triggering.
+**Rationale**: The O(1) operation provides instant results on multi-TB volumes, while `du` would take hours. Go reads `Bfree` for bytes already used and `Bavail` for space available to the cache writer, so thresholds exclude filesystem blocks reserved for privileged users.
 
 ### 5. Hex Modulo Load Balancing
 

@@ -17,5 +17,8 @@ func UsageFromStatfs(path string) (Usage, error) {
 	if blockSize == 0 {
 		blockSize = int64(stat.Bsize) //nolint:unconvert // int32 on 32-bit Linux.
 	}
-	return usageFromBlocks(blockSize, stat.Blocks, stat.Bfree)
+	// Bfree includes blocks reserved for privileged users. Bavail is the free
+	// space available to the cache writer, so both values are needed to report
+	// used capacity and calculate pressure against usable capacity.
+	return usageFromBlocks(blockSize, stat.Blocks, stat.Bfree, stat.Bavail)
 }

@@ -23,11 +23,12 @@ func TestUsageFromStatfs(t *testing.T) {
 	if usage.AvailableBytes > usage.TotalBytes {
 		t.Fatalf("available bytes %d exceeds total bytes %d", usage.AvailableBytes, usage.TotalBytes)
 	}
-	if usage.UsedBytes+usage.AvailableBytes != usage.TotalBytes {
-		t.Fatalf("used %d + available %d does not equal total %d", usage.UsedBytes, usage.AvailableBytes, usage.TotalBytes)
+	usableBytes := usage.UsedBytes + usage.AvailableBytes
+	if usableBytes > usage.TotalBytes {
+		t.Fatalf("usable bytes %d exceed total bytes %d", usableBytes, usage.TotalBytes)
 	}
 
-	want := float64(usage.UsedBytes) / float64(usage.TotalBytes) * 100
+	want := float64(usage.UsedBytes) / float64(usableBytes) * 100
 	if usage.UsagePercent < 0 || usage.UsagePercent > 100 {
 		t.Fatalf("usage percent %v is outside 0-100", usage.UsagePercent)
 	}
