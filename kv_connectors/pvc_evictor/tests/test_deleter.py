@@ -3,7 +3,11 @@
 import importlib.util
 import json
 import logging
+import os
+import queue
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 
@@ -305,3 +309,145 @@ def test_delete_file_batch_no_events_on_dry_run(tmp_path, monkeypatch):
 
     assert total_deleted == len(files)
     assert publisher.calls == []
+
+
+# -- delete_batch against a real directory tree --
+
+delete_batch = _deleter.delete_batch
+DeletionPacer = _deleter.DeletionPacer
+
+
+def _cold_file(path: Path, size: int = 8, age_seconds: float = 3600) -> str:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    then = time.time() - age_seconds
+    os.utime(path, (then, then))
+    return str(path)
+
+
+def test_delete_batch_unlinks_files_and_reports_bytes(tmp_path):
+    a = _cold_file(tmp_path / "r0/abc/de_g0/a.bin", size=10)
+    b = _cold_file(tmp_path / "r0/abc/ff_g0/b.bin", size=32)
+
+    deleted, freed, paths = delete_batch([a, b], False, logging.getLogger("t"))
+
+    assert (deleted, freed) == (2, 42)
+    assert sorted(paths) == sorted([a, b])
+    assert not os.path.exists(a)
+    assert not os.path.exists(b)
+
+
+def test_delete_batch_skips_missing_files(tmp_path):
+    a = _cold_file(tmp_path / "a.bin", size=5)
+    missing = str(tmp_path / "gone.bin")
+
+    deleted, freed, paths = delete_batch([missing, a, a], False, logging.getLogger("t"))
+
+    assert (deleted, freed, paths) == (1, 5, [a])
+
+
+def test_delete_batch_skips_files_accessed_since_queued(tmp_path):
+    cold = _cold_file(tmp_path / "cold.bin")
+    hot = _cold_file(tmp_path / "hot.bin", age_seconds=0)
+
+    deleted, _, paths = delete_batch([cold, hot], False, logging.getLogger("t"), min_idle_seconds=600)
+
+    assert (deleted, paths) == (1, [cold])
+    assert os.path.exists(hot)
+
+
+def test_delete_batch_offers_parent_dirs_to_folder_queue(tmp_path):
+    a = _cold_file(tmp_path / "r0/abc/de_g0/a.bin")
+    b = _cold_file(tmp_path / "r0/abc/de_g0/b.bin")
+    c = _cold_file(tmp_path / "r0/abc/ff_g0/c.bin")
+    folders: queue.Queue[str] = queue.Queue()
+
+    delete_batch([a, b, c], False, logging.getLogger("t"), folder_queue=folders)
+
+    assert sorted(folders.queue) == sorted([str(tmp_path / "r0/abc/de_g0"), str(tmp_path / "r0/abc/ff_g0")])
+
+
+def test_delete_batch_dry_run_leaves_files(tmp_path):
+    a = _cold_file(tmp_path / "a.bin")
+
+    deleted, freed, paths = delete_batch([a], True, logging.getLogger("t"))
+
+    assert (deleted, freed, paths) == (1, 0, [])
+    assert os.path.exists(a)
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores directory permissions")
+def test_delete_batch_continues_past_unlink_failure(tmp_path):
+    locked_dir = tmp_path / "locked"
+    locked = _cold_file(locked_dir / "a.bin")
+    ok = _cold_file(tmp_path / "ok.bin", size=3)
+    locked_dir.chmod(0o500)
+    try:
+        deleted, freed, paths = delete_batch([locked, ok], False, logging.getLogger("t"))
+    finally:
+        locked_dir.chmod(0o700)
+
+    assert (deleted, freed, paths) == (1, 3, [ok])
+    assert os.path.exists(locked)
+
+
+def test_delete_file_batch_passes_idle_threshold_through(tmp_path):
+    hot = _cold_file(tmp_path / "hot.bin", age_seconds=0)
+
+    total_deleted, _, _ = delete_file_batch(
+        [hot], False, logging.getLogger("t"), "P1", 0, 0, None, FakeQueue(), min_idle_seconds=600
+    )
+
+    assert total_deleted == 0
+    assert os.path.exists(hot)
+
+
+# -- DeletionPacer --
+
+
+def test_pacer_disabled_does_not_wait():
+    pacer = DeletionPacer(0)
+    start = time.monotonic()
+    for _ in range(1000):
+        pacer.acquire()
+    assert time.monotonic() - start < 0.5
+
+
+def test_pacer_spaces_operations_at_rate():
+    pacer = DeletionPacer(50)
+    start = time.monotonic()
+    for _ in range(11):
+        pacer.acquire()
+    elapsed = time.monotonic() - start
+    # 11 slots at 20ms spacing: the first is immediate, the last starts at 200ms.
+    assert 0.19 <= elapsed < 0.6
+
+
+def test_pacer_does_not_bank_idle_time_as_burst():
+    pacer = DeletionPacer(20)
+    pacer.acquire()
+    time.sleep(0.3)
+    start = time.monotonic()
+    pacer.acquire()
+    pacer.acquire()
+    assert time.monotonic() - start >= 0.04
+
+
+def test_pacer_returns_early_on_stop_event():
+    stop = threading.Event()
+    stop.set()
+    pacer = DeletionPacer(1, stop_event=stop)
+    start = time.monotonic()
+    for _ in range(5):
+        pacer.acquire()
+    assert time.monotonic() - start < 0.5
+
+
+def test_delete_batch_respects_pacer(tmp_path):
+    files = [_cold_file(tmp_path / f"{i}.bin") for i in range(6)]
+    start = time.monotonic()
+
+    deleted, _, _ = delete_batch(files, False, logging.getLogger("t"), pacer=DeletionPacer(50))
+
+    assert deleted == 6
+    assert time.monotonic() - start >= 0.09
