@@ -2,6 +2,33 @@
 
 This document provides configuration reference for the Python PVC Evictor and its Helm chart. The Go implementation uses a separate deployment path and is not deployed or configured by Helm.
 
+## Go command-line flags
+
+The Go binary accepts command-line flags and environment variables. An
+environment variable overrides its matching flag; the flag is used when the
+environment variable is unset. Use `pvc-evictor --help` to print the flags.
+
+| Flag | Environment variable | Default |
+|------|----------------------|---------|
+| `--pvc-mount-path` | `PVC_MOUNT_PATH` | `/kv-cache` |
+| `--cache-directory` | `CACHE_DIRECTORY` | `kv/model-cache/models` |
+| `--cleanup-threshold` | `CLEANUP_THRESHOLD` | `85.0` |
+| `--target-threshold` | `TARGET_THRESHOLD` | `70.0` |
+| `--dry-run` | `DRY_RUN` | `false` |
+| `--log-level` | `LOG_LEVEL` | `INFO` |
+| `--num-crawler-processes` | `NUM_CRAWLER_PROCESSES` | `8` |
+| `--logger-interval-seconds` | `LOGGER_INTERVAL_SECONDS` | `0.5` |
+| `--file-queue-max-size` | `FILE_QUEUE_MAXSIZE` | `10000` |
+| `--file-queue-min-size` | `FILE_QUEUE_MIN_SIZE` | `1000` |
+| `--deletion-batch-size` | `DELETION_BATCH_SIZE` | `100` |
+| `--deletion-max-files-per-second` | `DELETION_MAX_FILES_PER_SECOND` | `0` |
+| `--file-access-time-threshold-minutes` | `FILE_ACCESS_TIME_THRESHOLD_MINUTES` | `60` |
+| `--hex-bucket-len` | `HEX_BUCKET_LEN` | `3` |
+| `--enable-dir-cleanup` | `ENABLE_DIR_CLEANUP` | `true` |
+| `--dir-cleanup-ttl-seconds` | `DIR_CLEANUP_TTL_SECONDS` | `120` |
+| `--log-file-path` | `LOG_FILE_PATH` | empty |
+| `--storage-events-endpoint` | `STORAGE_EVENTS_ENDPOINT` | empty |
+
 ## Environment Variables
 
 The Python implementation reads environment variables. In the Helm deployment, these values are set through Helm chart values.

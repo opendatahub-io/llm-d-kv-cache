@@ -17,6 +17,66 @@ func TestFromEnvInvalidNumber(t *testing.T) {
 	}
 }
 
+func TestEnvironmentOverridesFlags(t *testing.T) {
+	t.Setenv("PVC_MOUNT_PATH", "/env-cache")
+	t.Setenv("CACHE_DIRECTORY", "env-models")
+	t.Setenv("CLEANUP_THRESHOLD", "80")
+	t.Setenv("TARGET_THRESHOLD", "60")
+	t.Setenv("DRY_RUN", "false")
+	t.Setenv("NUM_CRAWLER_PROCESSES", "2")
+
+	cfg, err := FromEnvAndFlags([]string{
+		"--pvc-mount-path", "/flag-cache",
+		"--cache-directory", "flag-models",
+		"--cleanup-threshold", "90",
+		"--target-threshold", "50",
+		"--dry-run",
+		"--num-crawler-processes", "4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PVCMountPath != "/env-cache" || cfg.CacheDirectory != "env-models" {
+		t.Fatalf("paths = %q/%q, want environment values", cfg.PVCMountPath, cfg.CacheDirectory)
+	}
+	if cfg.CleanupThreshold != 80 || cfg.TargetThreshold != 60 || cfg.DryRun {
+		t.Fatalf("thresholds/dry-run = %v/%v/%v, want 80/60/false", cfg.CleanupThreshold, cfg.TargetThreshold, cfg.DryRun)
+	}
+	if cfg.NumCrawlerProcesses != 2 {
+		t.Fatalf("crawler count = %d, want 2", cfg.NumCrawlerProcesses)
+	}
+}
+
+func TestInvalidEnvironmentOverridesFlag(t *testing.T) {
+	t.Setenv("CLEANUP_THRESHOLD", "not-a-number")
+	t.Setenv("TARGET_THRESHOLD", "60")
+
+	if _, err := FromEnvAndFlags([]string{"--cleanup-threshold", "90"}); err == nil {
+		t.Fatal("expected invalid environment value to override the flag")
+	}
+}
+
+func TestFlagsUsedWhenEnvironmentIsUnset(t *testing.T) {
+	t.Setenv("PVC_MOUNT_PATH", "")
+	t.Setenv("CACHE_DIRECTORY", "")
+	t.Setenv("CLEANUP_THRESHOLD", "")
+	t.Setenv("TARGET_THRESHOLD", "")
+
+	cfg, err := FromEnvAndFlags([]string{
+		"--pvc-mount-path", "/flag-cache",
+		"--cache-directory", "flag-models",
+		"--cleanup-threshold", "90",
+		"--target-threshold", "50",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.PVCMountPath != "/flag-cache" || cfg.CacheDirectory != "flag-models" ||
+		cfg.CleanupThreshold != 90 || cfg.TargetThreshold != 50 {
+		t.Fatalf("configuration did not use flags: %+v", cfg)
+	}
+}
+
 func TestEnvIntRejectsNonIntegerValues(t *testing.T) {
 	for _, value := range []string{"1.5", "NaN", "+Inf", "-Inf"} {
 		t.Run(value, func(t *testing.T) {

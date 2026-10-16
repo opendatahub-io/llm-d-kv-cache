@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log/slog"
@@ -16,13 +18,16 @@ import (
 
 func main() {
 	if err := run(); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fmt.Fprintf(os.Stderr, "FATAL ERROR: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run() error {
-	cfg, err := config.FromEnv()
+	cfg, err := config.FromEnvAndFlags(os.Args[1:])
 	if err != nil {
 		return err
 	}

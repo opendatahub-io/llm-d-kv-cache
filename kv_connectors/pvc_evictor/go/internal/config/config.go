@@ -1,6 +1,7 @@
 package config
 
 import (
+	"flag"
 	"fmt"
 	"math"
 	"os"
@@ -56,84 +57,199 @@ type Config struct {
 }
 
 func FromEnv() (Config, error) {
-	cleanupThreshold, err := envFloat("CLEANUP_THRESHOLD", DefaultCleanupThreshold)
+	return FromEnvAndFlags(nil)
+}
+
+func FromEnvAndFlags(args []string) (Config, error) {
+	flags := flag.NewFlagSet("pvc-evictor", flag.ContinueOnError)
+	pvcMountPath := flags.String(
+		"pvc-mount-path", DefaultPVCMountPath, "filesystem mount path",
+	)
+	cacheDirectory := flags.String(
+		"cache-directory", DefaultCacheDirectory, "relative cache directory below the mount path",
+	)
+	cleanupThreshold := flags.Float64(
+		"cleanup-threshold", DefaultCleanupThreshold, "disk usage percentage that starts deletion",
+	)
+	targetThreshold := flags.Float64(
+		"target-threshold", DefaultTargetThreshold, "disk usage percentage that stops deletion",
+	)
+	dryRun := flags.Bool("dry-run", DefaultDryRun, "log deletion decisions without deleting files")
+	logLevel := flags.String("log-level", DefaultLogLevel, "log level: DEBUG, INFO, WARNING, or ERROR")
+	numCrawlerProcesses := flags.Int("num-crawler-processes", DefaultNumCrawlerProcesses, "number of crawler workers")
+	loggerIntervalSeconds := flags.Float64(
+		"logger-interval-seconds", durationToSeconds(DefaultLoggerInterval), "disk usage check interval in seconds",
+	)
+	fileQueueMaxSize := flags.Int("file-queue-max-size", DefaultFileQueueMaxSize, "maximum file queue size")
+	fileQueueMinSize := flags.Int("file-queue-min-size", DefaultFileQueueMinSize, "minimum file queue size")
+	deletionBatchSize := flags.Int("deletion-batch-size", DefaultDeletionBatchSize, "files per deletion batch")
+	deletionMaxFilesPerSecond := flags.Float64(
+		"deletion-max-files-per-second", DefaultDeletionMaxFilesPerSecond, "maximum deletion rate; zero means unlimited",
+	)
+	accessThresholdMinutes := flags.Float64(
+		"file-access-time-threshold-minutes",
+		durationToMinutes(DefaultFileAccessTimeThreshold),
+		"protect files accessed within this many minutes",
+	)
+	hexBucketLen := flags.Int("hex-bucket-len", DefaultHexBucketLen, "hex bucket name length")
+	enableDirCleanup := flags.Bool("enable-dir-cleanup", DefaultEnableDirCleanup, "remove eligible empty directories")
+	dirCleanupTTLSeconds := flags.Float64(
+		"dir-cleanup-ttl-seconds", durationToSeconds(DefaultDirCleanupTTL), "empty-directory quiet period in seconds",
+	)
+	logFilePath := flags.String("log-file-path", "", "additional log file path")
+	storageEventsEndpoint := flags.String(
+		"storage-events-endpoint", DefaultStorageEventsEndpoint, "ZeroMQ endpoint for BlockRemoved events",
+	)
+
+	if err := flags.Parse(args); err != nil {
+		return Config{}, err
+	}
+
+	cleanupThresholdValue, err := floatSetting(
+		flags, "cleanup-threshold", *cleanupThreshold, "CLEANUP_THRESHOLD", DefaultCleanupThreshold,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid CLEANUP_THRESHOLD: %w", err)
 	}
-	targetThreshold, err := envFloat("TARGET_THRESHOLD", DefaultTargetThreshold)
+	targetThresholdValue, err := floatSetting(
+		flags, "target-threshold", *targetThreshold, "TARGET_THRESHOLD", DefaultTargetThreshold,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid TARGET_THRESHOLD: %w", err)
 	}
-	dryRun, err := envBool("DRY_RUN", DefaultDryRun)
+	dryRunValue, err := boolSetting(flags, "dry-run", *dryRun, "DRY_RUN", DefaultDryRun)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid DRY_RUN: %w", err)
 	}
-	numCrawlerProcesses, err := envInt("NUM_CRAWLER_PROCESSES", DefaultNumCrawlerProcesses)
+	numCrawlerProcessesValue, err := intSetting(
+		flags, "num-crawler-processes", *numCrawlerProcesses, "NUM_CRAWLER_PROCESSES", DefaultNumCrawlerProcesses,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid NUM_CRAWLER_PROCESSES: %w", err)
 	}
-	loggerIntervalSeconds, err := envFloat("LOGGER_INTERVAL_SECONDS", durationToSeconds(DefaultLoggerInterval))
+	loggerIntervalSecondsValue, err := floatSetting(
+		flags, "logger-interval-seconds", *loggerIntervalSeconds, "LOGGER_INTERVAL_SECONDS", durationToSeconds(DefaultLoggerInterval),
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid LOGGER_INTERVAL_SECONDS: %w", err)
 	}
-	fileQueueMaxSize, err := envInt("FILE_QUEUE_MAXSIZE", DefaultFileQueueMaxSize)
+	fileQueueMaxSizeValue, err := intSetting(
+		flags, "file-queue-max-size", *fileQueueMaxSize, "FILE_QUEUE_MAXSIZE", DefaultFileQueueMaxSize,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid FILE_QUEUE_MAXSIZE: %w", err)
 	}
-	fileQueueMinSize, err := envInt("FILE_QUEUE_MIN_SIZE", DefaultFileQueueMinSize)
+	fileQueueMinSizeValue, err := intSetting(
+		flags, "file-queue-min-size", *fileQueueMinSize, "FILE_QUEUE_MIN_SIZE", DefaultFileQueueMinSize,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid FILE_QUEUE_MIN_SIZE: %w", err)
 	}
-	deletionBatchSize, err := envInt("DELETION_BATCH_SIZE", DefaultDeletionBatchSize)
+	deletionBatchSizeValue, err := intSetting(
+		flags, "deletion-batch-size", *deletionBatchSize, "DELETION_BATCH_SIZE", DefaultDeletionBatchSize,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid DELETION_BATCH_SIZE: %w", err)
 	}
-	deletionMaxFilesPerSecond, err := envFloat("DELETION_MAX_FILES_PER_SECOND", DefaultDeletionMaxFilesPerSecond)
+	deletionMaxFilesPerSecondValue, err := floatSetting(
+		flags,
+		"deletion-max-files-per-second",
+		*deletionMaxFilesPerSecond,
+		"DELETION_MAX_FILES_PER_SECOND",
+		DefaultDeletionMaxFilesPerSecond,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid DELETION_MAX_FILES_PER_SECOND: %w", err)
 	}
-	accessThresholdMinutes, err := envFloat("FILE_ACCESS_TIME_THRESHOLD_MINUTES", durationToMinutes(DefaultFileAccessTimeThreshold))
+	accessThresholdMinutesValue, err := floatSetting(
+		flags,
+		"file-access-time-threshold-minutes",
+		*accessThresholdMinutes,
+		"FILE_ACCESS_TIME_THRESHOLD_MINUTES",
+		durationToMinutes(DefaultFileAccessTimeThreshold),
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid FILE_ACCESS_TIME_THRESHOLD_MINUTES: %w", err)
 	}
-	hexBucketLen, err := envInt("HEX_BUCKET_LEN", DefaultHexBucketLen)
+	hexBucketLenValue, err := intSetting(flags, "hex-bucket-len", *hexBucketLen, "HEX_BUCKET_LEN", DefaultHexBucketLen)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid HEX_BUCKET_LEN: %w", err)
 	}
-	dirCleanupTTLSeconds, err := envFloat("DIR_CLEANUP_TTL_SECONDS", durationToSeconds(DefaultDirCleanupTTL))
+	dirCleanupTTLSecondsValue, err := floatSetting(
+		flags, "dir-cleanup-ttl-seconds", *dirCleanupTTLSeconds, "DIR_CLEANUP_TTL_SECONDS", durationToSeconds(DefaultDirCleanupTTL),
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid DIR_CLEANUP_TTL_SECONDS: %w", err)
 	}
-	enableDirCleanup, err := envBool("ENABLE_DIR_CLEANUP", DefaultEnableDirCleanup)
+	enableDirCleanupValue, err := boolSetting(
+		flags, "enable-dir-cleanup", *enableDirCleanup, "ENABLE_DIR_CLEANUP", DefaultEnableDirCleanup,
+	)
 	if err != nil {
 		return Config{}, fmt.Errorf("invalid ENABLE_DIR_CLEANUP: %w", err)
 	}
 
 	cfg := Config{
-		PVCMountPath:              envString("PVC_MOUNT_PATH", DefaultPVCMountPath),
-		CacheDirectory:            envString("CACHE_DIRECTORY", DefaultCacheDirectory),
-		CleanupThreshold:          cleanupThreshold,
-		TargetThreshold:           targetThreshold,
-		DryRun:                    dryRun,
-		LogLevel:                  envString("LOG_LEVEL", DefaultLogLevel),
-		NumCrawlerProcesses:       numCrawlerProcesses,
-		LoggerInterval:            secondsToDuration(loggerIntervalSeconds),
-		FileQueueMaxSize:          fileQueueMaxSize,
-		FileQueueMinSize:          fileQueueMinSize,
-		DeletionBatchSize:         deletionBatchSize,
-		DeletionMaxFilesPerSecond: deletionMaxFilesPerSecond,
-		FileAccessTimeThreshold:   minutesToDuration(accessThresholdMinutes),
-		HexBucketLen:              hexBucketLen,
-		EnableDirCleanup:          enableDirCleanup,
-		DirCleanupTTL:             secondsToDuration(dirCleanupTTLSeconds),
-		LogFilePath:               os.Getenv("LOG_FILE_PATH"),
-		StorageEventsEndpoint:     envString("STORAGE_EVENTS_ENDPOINT", DefaultStorageEventsEndpoint),
+		PVCMountPath:              stringSetting(flags, "pvc-mount-path", *pvcMountPath, "PVC_MOUNT_PATH", DefaultPVCMountPath),
+		CacheDirectory:            stringSetting(flags, "cache-directory", *cacheDirectory, "CACHE_DIRECTORY", DefaultCacheDirectory),
+		CleanupThreshold:          cleanupThresholdValue,
+		TargetThreshold:           targetThresholdValue,
+		DryRun:                    dryRunValue,
+		LogLevel:                  stringSetting(flags, "log-level", *logLevel, "LOG_LEVEL", DefaultLogLevel),
+		NumCrawlerProcesses:       numCrawlerProcessesValue,
+		LoggerInterval:            secondsToDuration(loggerIntervalSecondsValue),
+		FileQueueMaxSize:          fileQueueMaxSizeValue,
+		FileQueueMinSize:          fileQueueMinSizeValue,
+		DeletionBatchSize:         deletionBatchSizeValue,
+		DeletionMaxFilesPerSecond: deletionMaxFilesPerSecondValue,
+		FileAccessTimeThreshold:   minutesToDuration(accessThresholdMinutesValue),
+		HexBucketLen:              hexBucketLenValue,
+		EnableDirCleanup:          enableDirCleanupValue,
+		DirCleanupTTL:             secondsToDuration(dirCleanupTTLSecondsValue),
+		LogFilePath:               stringSetting(flags, "log-file-path", *logFilePath, "LOG_FILE_PATH", ""),
+		StorageEventsEndpoint: stringSetting(
+			flags,
+			"storage-events-endpoint",
+			*storageEventsEndpoint,
+			"STORAGE_EVENTS_ENDPOINT",
+			DefaultStorageEventsEndpoint,
+		),
 	}
 
 	if err := cfg.Validate(); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func stringSetting(_ *flag.FlagSet, _, flagValue, envName, fallback string) string {
+	if value := os.Getenv(envName); value != "" {
+		return value
+	}
+	if flagValue != fallback {
+		return flagValue
+	}
+	return fallback
+}
+
+func floatSetting(_ *flag.FlagSet, _ string, flagValue float64, envName string, fallback float64) (float64, error) {
+	if os.Getenv(envName) != "" {
+		return envFloat(envName, fallback)
+	}
+	return flagValue, nil
+}
+
+func intSetting(_ *flag.FlagSet, _ string, flagValue int, envName string, fallback int) (int, error) {
+	if os.Getenv(envName) != "" {
+		return envInt(envName, fallback)
+	}
+	return flagValue, nil
+}
+
+func boolSetting(_ *flag.FlagSet, _ string, flagValue bool, envName string, fallback bool) (bool, error) {
+	if os.Getenv(envName) != "" {
+		return envBool(envName, fallback)
+	}
+	return flagValue, nil
 }
 
 func (c *Config) Validate() error {
