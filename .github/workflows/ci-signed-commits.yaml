@@ -19,10 +19,10 @@ jobs:
           if [[ "$PR_AUTHOR" == "github-actions[bot]" ]] || \
              [[ "$PR_AUTHOR" == "dependabot[bot]" ]] || \
              [[ "$PR_AUTHOR" == *"[bot]" ]]; then
-            echo "is_bot=true" >> $GITHUB_OUTPUT
+            echo "is_bot=true" >> "$GITHUB_OUTPUT"
             echo "Bot-authored PR detected - skipping signature check"
           else
-            echo "is_bot=false" >> $GITHUB_OUTPUT
+            echo "is_bot=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check signed commits
