@@ -147,8 +147,11 @@ func assertBlockRemovedMessage(t *testing.T, message zmq4.Msg) {
 	if err := msgpack.Unmarshal(message.Frames[2], &batch); err != nil {
 		t.Fatal(err)
 	}
-	if len(batch) != 2 {
-		t.Fatalf("batch has %d fields, want 2", len(batch))
+	if len(batch) != 3 {
+		t.Fatalf("batch has %d fields, want 3", len(batch))
+	}
+	if batch[2] != nil {
+		t.Fatalf("data parallel rank = %#v, want nil", batch[2])
 	}
 	rawEvents, ok := batch[1].([]any)
 	if !ok || len(rawEvents) != 1 {
