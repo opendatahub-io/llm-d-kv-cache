@@ -157,13 +157,9 @@ func assertBlockRemovedMessage(t *testing.T, message zmq4.Msg) {
 	if !ok || len(rawEvents) != 1 {
 		t.Fatalf("events = %#v, want one event", batch[1])
 	}
-	rawEvent, ok := rawEvents[0].([]byte)
+	event, ok := rawEvents[0].([]any)
 	if !ok {
-		t.Fatalf("event = %T, want []byte", rawEvents[0])
-	}
-	var event []any
-	if err := msgpack.Unmarshal(rawEvent, &event); err != nil {
-		t.Fatal(err)
+		t.Fatalf("event = %T, want []any", rawEvents[0])
 	}
 	if len(event) != 3 || event[0] != "BlockRemoved" || event[2] != "SHARED_STORAGE" {
 		t.Fatalf("event = %#v", event)

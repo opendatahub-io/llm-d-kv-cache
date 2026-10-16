@@ -47,7 +47,7 @@ func (p *Publisher) PublishBlocksRemoved(ctx context.Context, blockHashes []uint
 	if err != nil {
 		return fmt.Errorf("encode BlockRemoved event: %w", err)
 	}
-	payload, err := msgpack.Marshal([]any{float64(time.Now().UnixNano()) / 1e9, [][]byte{event}, nil})
+	payload, err := msgpack.Marshal([]any{float64(time.Now().UnixNano()) / 1e9, []msgpack.RawMessage{event}, nil})
 	if err != nil {
 		return fmt.Errorf("encode BlockRemoved batch: %w", err)
 	}
