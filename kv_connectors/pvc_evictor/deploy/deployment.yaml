@@ -1,0 +1,63 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-d-kv-cache-pvc-evictor
+  labels:
+    app.kubernetes.io/name: llm-d-kv-cache-pvc-evictor
+    app.kubernetes.io/part-of: llm-d-kv-cache
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: llm-d-kv-cache-pvc-evictor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: llm-d-kv-cache-pvc-evictor
+        app.kubernetes.io/part-of: llm-d-kv-cache
+    spec:
+      serviceAccountName: llm-d-kv-cache-pvc-evictor
+      securityContext:
+        # The user and group IDs are not set here. The Go image runs as UID
+        # 65532, and OpenShift assigns an ID from the namespace range. If the
+        # vLLM workload writes the cache files as another user, set runAsUser,
+        # runAsGroup and fsGroup with a patch. See
+        # patches/security-and-affinity-example.yaml.
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      terminationGracePeriodSeconds: 30
+      containers:
+      - name: pvc-evictor
+        # The tag is set by the images entry in kustomization.yaml.
+        image: quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor
+        # The odh-stable-go tag is replaced on every build, so always pull.
+        imagePullPolicy: Always
+        securityContext:
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+          runAsNonRoot: true
+        envFrom:
+        - configMapRef:
+            name: llm-d-kv-cache-pvc-evictor-config
+        resources:
+          requests:
+            cpu: "1"
+            memory: 1Gi
+          limits:
+            cpu: "4"
+            memory: 2Gi
+        volumeMounts:
+        - name: kv-cache-storage
+          mountPath: /kv-cache
+      volumes:
+      - name: kv-cache-storage
+        # Set claimName to the existing PVC that holds the vLLM KV cache. To use
+        # NFS or a CSI volume instead, replace persistentVolumeClaim with that
+        # volume source.
+        persistentVolumeClaim:
+          claimName: my-vllm-cache-pvc

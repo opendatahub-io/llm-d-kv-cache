@@ -4,9 +4,9 @@ Automatic disk space management for vLLM KV-cache storage on Kubernetes PVCs.
 
 ## Overview
 
-The PVC Evictor is a multi-process Kubernetes deployment designed to automatically manage disk space on PVCs used for vLLM KV-cache storage offloading. It monitors PVC disk usage and automatically deletes old cache files when configured thresholds are exceeded, enabling continuous vLLM operation while resolving storage capacity exhaustion without manual intervention.
+The PVC Evictor provides two implementations for automatically managing disk space on PVCs used for vLLM KV-cache storage offloading. The Helm chart deploys the Python implementation. The Go implementation is built separately and deploys with the manifests in [deploy/](deploy/).
 
-## Quick Start
+## Quick Start: Python implementation with Helm
 
 The chart defaults to the latest PVC Evictor image:
 
@@ -26,52 +26,31 @@ helm install pvc-evictor ./helm \
 
 See [QUICK_START.md](QUICK_START.md) for detailed deployment instructions.
 
-## Architecture
+## Quick Start: Go implementation with Kubernetes manifests
 
-The evictor uses an **N+2 process architecture** where N parallel crawler processes discover cache files, while two dedicated processes (activator and deleter) coordinate and execute the deletion workflow.
+Replace the existing shared PVC name in
+[deploy/deployment.yaml](deploy/deployment.yaml) and the target namespace in
+[deploy/kustomization.yaml](deploy/kustomization.yaml), then apply the
+manifests:
 
-### Architecture Diagram
-
-```mermaid
-graph TB
-    subgraph "PVC Evictor Pod"
-        Main[Main Process<br/>evictor.py]
-        
-        subgraph "Crawler Processes"
-            C1[Crawler 1<br/>hex range: 0-1]
-            ...
-            CN[Crawler N<br/>hex range: E-F]
-        end
-        
-        Act[Activator Process<br/>monitors disk usage]
-        Del[Deleter Process<br/>batch deletion]
-        
-        Queue[multiprocessing.Queue<br/>file paths FIFO]
-        DelEvent[deletion_event<br/>Event flag]
-    end
-    
-    PVC[PVC Mount<br/>/kv-cache]
-    
-    Main -->|spawns & monitors| C1
-    Main -->|spawns & monitors| CN
-    Main -->|spawns & monitors| Act
-    Main -->|spawns & monitors| Del
-    
-    C1 -..->|scan files| PVC
-    CN -..->|scan files| PVC
-    
-    C1 -->|put file paths| Queue
-    CN -->|put file paths| Queue
-    
-    Act -..->|check usage| PVC
-    Act -->|set/clear| DelEvent
-    
-    Del -->|get file paths| Queue
-    Del -->|check flag| DelEvent
-    Del -..->|delete files| PVC
+```bash
+kubectl apply -k deploy/
 ```
 
-### Process Roles
+The default Go image is
+`quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:odh-stable-go`.
+
+## Architecture
+
+The repository contains two implementations:
+
+- The legacy Python implementation uses separate operating-system processes.
+- The Go implementation uses one operating-system process with supervised goroutines.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the legacy Python and Go
+architecture diagrams.
+
+### Python Process Roles
 
 - **N Crawler Processes** - Discover and queue files for deletion (N configurable: 1, 2, 4, 8, or 16, default: 8)
 - **Activator Process** - Monitors disk usage and controls deletion triggers
@@ -117,7 +96,7 @@ If the PVC reaches 100% before deletion frees space, vLLM cache writes will fail
 Most filesystems use `relatime` (relative atime) which only updates access time if the file wasn't accessed in the past 24 hours. This means recently accessed files may appear "cold" and be deleted if they were last accessed more than 24 hours ago, even if accessed multiple times since then.
 
 **Disk Usage Calculation:**
-The evictor uses `statvfs()` for performance instead of the more accurate `du` scan. Usage is calculated as `used / (used + available)`, where available space excludes filesystem blocks reserved for privileged users. Cleanup thresholds therefore reflect the capacity available to the cache writer, as in `df`. Filesystem metadata and block allocation can make usage differ from a `du` scan.
+The evictor uses `statvfs()` in Python and `statfs()` in Go for O(1) disk usage checks instead of the more expensive `du` scan. Usage is calculated as `used / (used + available)`, where available space excludes filesystem blocks reserved for privileged users. Cleanup thresholds therefore reflect the capacity available to the cache writer, as in `df`. Filesystem metadata and block allocation can make usage differ from a `du` scan.
 
 Status and deletion-event logs report this capacity as `usable` (`used + available`), with the full filesystem capacity reported separately as `total`.
 
@@ -133,7 +112,7 @@ Key settings (see [CONFIGURATION.md](CONFIGURATION.md) for complete reference):
 | `cacheDirectory` | `kv/model-cache/models` | Cache path relative to PVC mount |
 | `fileAccessTimeThresholdMinutes` | 60 | Protect files accessed within N minutes |
 
-## Monitoring
+## Python monitoring
 
 ### Log Patterns
 
@@ -170,6 +149,13 @@ kubectl logs -f deployment/pvc-evictor-pvc-evictor
 kubectl logs -f deployment/pvc-evictor-pvc-evictor
 ```
 
+For the Go deployment, use its namespace and name:
+
+```bash
+NAMESPACE=my-namespace
+kubectl logs -f deployment/llm-d-kv-cache-pvc-evictor -n "$NAMESPACE"
+```
+
 ## On-disk cache layout
 
 Crawlers discover `.bin` files under the flat layout used by llmd_fs_backend (v0.20+). The crawler does not import vLLM or FileMapper. The image still bundles `llmd_fs_backend` for optional storage events when `STORAGE_EVENTS_ENDPOINT` is set (see #605).
@@ -192,17 +178,25 @@ make test
 project with its `dev` extra (`pip install -e ".[dev]"`) before running the
 suite.
 
-Build image (from `kv_connectors/`):
+`make test` and `make docker-build` are for the Python implementation used by Helm. Run `make test_go` and `make docker-build_go` for the Go implementation deployed by [deploy/](deploy/).
+The Go implementation builds only on Linux, because it reads file and filesystem metadata with Linux system calls. On macOS or Windows, build and test it in a Linux container.
+
+Build images from `kv_connectors/pvc_evictor/`:
 
 ```bash
-make docker-build
+cd kv_connectors/pvc_evictor
+make docker-build       # Python image
+make docker-build_go    # Go image
 ```
 
-By default, this builds `quay.io/pvc-evictor/pvc-evictor:latest`.
-Override the target when testing a local or development tag:
+By default, `make docker-build` builds `quay.io/pvc-evictor/pvc-evictor:latest`
+and `make docker-build_go` builds
+`quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:latest`.
+Override the targets when testing local or development tags:
 
 ```bash
 make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm-d-v0.8
+make docker-build_go GO_IMAGE_REPOSITORY=quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor GO_IMAGE_TAG=odh-pr-go-abcdef1
 ```
 
 ## Documentation
@@ -210,6 +204,7 @@ make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm
 - **[QUICK_START.md](QUICK_START.md)** - Deployment guide
 - **[CONFIGURATION.md](CONFIGURATION.md)** - Complete configuration reference
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture and design
+- **[deploy/](deploy/)** - Go deployment manifests
 - **[helm/README.md](helm/README.md)** - Helm chart documentation
 
 ## Requirements

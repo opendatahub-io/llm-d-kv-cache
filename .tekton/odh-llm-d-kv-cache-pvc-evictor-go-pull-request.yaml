@@ -8,14 +8,14 @@ metadata:
     pipelinesascode.tekton.dev/cancel-in-progress: "false"
     pipelinesascode.tekton.dev/max-keep-runs: "3"
     pipelinesascode.tekton.dev/on-cel-expression: event == "pull_request" && target_branch
-      == "main" && ( "services/uds_tokenizer/***".pathChanged() || ".tekton/llm-d-kv-cache-release-pull-request.yaml".pathChanged()
+      == "main" && ( "kv_connectors/pvc_evictor/go/***".pathChanged() || ".tekton/odh-llm-d-kv-cache-pvc-evictor-go-pull-request.yaml".pathChanged()
       )
   creationTimestamp: null
   labels:
     appstudio.openshift.io/application: opendatahub-builds
-    appstudio.openshift.io/component: odh-llm-d-kv-cache-ci
+    appstudio.openshift.io/component: odh-llm-d-kv-cache-pvc-evictor-go-ci
     pipelines.appstudio.openshift.io/type: build
-  name: odh-llm-d-kv-cache-on-pull-request
+  name: odh-llm-d-kv-cache-pvc-evictor-go-on-pull-request
   namespace: open-data-hub-tenant
 spec:
   params:
@@ -24,14 +24,14 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/opendatahub/llm-d-kv-cache:odh-pr
+    value: quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:odh-pr-go
   - name: dockerfile
     value: Dockerfile
   - name: path-context
-    value: services/uds_tokenizer
+    value: kv_connectors/pvc_evictor/go/
   - name: additional-tags
     value:
-    - 'odh-pr-{{revision}}'
+    - 'odh-pr-go-{{revision}}'
   - name: pipeline-type
     value: pull-request
   pipelineRef:
@@ -44,7 +44,7 @@ spec:
     - name: pathInRepo
       value: pipeline/multi-arch-container-build.yaml
   taskRunTemplate:
-    serviceAccountName: build-pipeline-llm-d-kv-cache
+    serviceAccountName: build-pipeline-odh-llm-d-kv-cache-pvc-evictor-go-ci
   workspaces:
   - name: git-auth
     secret:

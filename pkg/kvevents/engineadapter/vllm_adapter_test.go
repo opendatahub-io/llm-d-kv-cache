@@ -74,6 +74,42 @@ func TestVLLMParseMessage_Valid(t *testing.T) {
 	assert.Equal(t, uint64(99), blockStored.ParentHash)
 }
 
+// TestVLLMParseMessage_BlockRemovedBatch verifies the exact batch shape emitted
+// by the PVC evictor's Go event publisher, including the optional data-parallel
+// rank field and the bin-wrapped event payload.
+func TestVLLMParseMessage_BlockRemovedBatch(t *testing.T) {
+	adapter := NewVLLMAdapter()
+
+	blockRemovedEvent, err := msgpack.Marshal([]any{
+		"BlockRemoved",
+		[]uint64{42, 43},
+		"SHARED_STORAGE",
+	})
+	require.NoError(t, err)
+
+	payload, err := msgpack.Marshal([]any{
+		1234567890.0,
+		[]msgpack.RawMessage{blockRemovedEvent},
+		nil,
+	})
+	require.NoError(t, err)
+
+	podID, modelName, eventBatch, err := adapter.ParseMessage(&kvevents.RawMessage{
+		Topic:   "kv@SHARED_STORAGE@test-model",
+		Payload: payload,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "SHARED_STORAGE", podID)
+	assert.Equal(t, "test-model", modelName)
+	assert.Equal(t, 1234567890.0, eventBatch.Timestamp)
+	require.Len(t, eventBatch.Events, 1)
+
+	blockRemoved, ok := eventBatch.Events[0].(*kvevents.BlockRemovedEvent)
+	require.True(t, ok, "expected BlockRemovedEvent")
+	assert.Equal(t, []uint64{42, 43}, blockRemoved.BlockHashes)
+	assert.Equal(t, "SHARED_STORAGE", blockRemoved.DeviceTier)
+}
+
 // TestVLLMParseMessage_InvalidPayload tests error handling for invalid msgpack data.
 func TestVLLMParseMessage_InvalidPayload(t *testing.T) {
 	adapter := NewVLLMAdapter()

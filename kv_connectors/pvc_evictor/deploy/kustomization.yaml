@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Replace with the namespace where the vLLM workload and shared PVC
+# are deployed.
+namespace: my-namespace
+
+resources:
+- serviceaccount.yaml
+- deployment.yaml
+
+configMapGenerator:
+- name: llm-d-kv-cache-pvc-evictor-config
+  envs:
+  - configmap.env
+
+# This is the only place that sets the image tag. To use another tag, change
+# newTag, or run `kustomize edit set image` in this directory.
+images:
+- name: quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor
+  newTag: odh-stable-go
