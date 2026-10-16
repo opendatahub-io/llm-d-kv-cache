@@ -38,7 +38,7 @@ kubectl apply -k deploy/
 ```
 
 The default Go image is
-`quay.io/opendatahub/llm-d-kv-cache:odh-stable-go`.
+`quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:odh-stable-go`.
 
 ## Architecture
 
@@ -191,12 +191,12 @@ make docker-build_go    # Go image
 
 By default, `make docker-build` builds `quay.io/pvc-evictor/pvc-evictor:latest`
 and `make docker-build_go` builds
-`quay.io/opendatahub/llm-d-kv-cache:latest`.
+`quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:latest`.
 Override the targets when testing local or development tags:
 
 ```bash
 make docker-build IMAGE_REPOSITORY=quay.io/pvc-evictor/pvc-evictor IMAGE_TAG=llm-d-v0.8
-make docker-build_go GO_IMAGE_REPOSITORY=quay.io/opendatahub/llm-d-kv-cache GO_IMAGE_TAG=odh-pr-go-abcdef1
+make docker-build_go GO_IMAGE_REPOSITORY=quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor GO_IMAGE_TAG=odh-pr-go-abcdef1
 ```
 
 ## Documentation

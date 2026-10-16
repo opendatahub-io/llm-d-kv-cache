@@ -89,7 +89,7 @@ the commands below from the `deploy/` directory. See
 - In `deployment.yaml`, replace `claimName: my-vllm-cache-pvc` with the name of the existing PVC. To use NFS or a CSI volume, replace the
   `persistentVolumeClaim` entry with that volume source.
 - In `configmap.env`, change Go settings such as `CLEANUP_THRESHOLD`, `TARGET_THRESHOLD` or `CACHE_DIRECTORY`. Applying new values restarts the Pod.
-- The default image is `quay.io/opendatahub/llm-d-kv-cache:odh-stable-go`. To use another tag, change `newTag` in `kustomization.yaml`. PR images use tag `odh-pr-go-<full-commit-sha>`, with the full 40-character commit SHA.
+- The default image is `quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:odh-stable-go`. To use another tag, change `newTag` in `kustomization.yaml`. PR images use tag `odh-pr-go-<full-commit-sha>`, with the full 40-character commit SHA.
 
 The Pod must be able to read and delete the files that vLLM writes.
 The manifests do not set a user ID or `fsGroup`. 

@@ -1,7 +1,7 @@
 IMAGE_REPOSITORY ?= quay.io/pvc-evictor/pvc-evictor
 IMAGE_TAG ?= latest
 # The Go image uses its own repository and tag variables.
-GO_IMAGE_REPOSITORY ?= quay.io/opendatahub/llm-d-kv-cache
+GO_IMAGE_REPOSITORY ?= quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor
 GO_IMAGE_TAG ?= latest
 
 PYTHON_EXE := $(shell command -v python3.12 || command -v python3)

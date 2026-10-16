@@ -28,7 +28,7 @@ kubectl apply -k .
 The default image is:
 
 ```text
-quay.io/opendatahub/llm-d-kv-cache:odh-stable-go
+quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:odh-stable-go
 ```
 
 The tag is set in one place, the `images` entry in `kustomization.yaml`. To use
@@ -39,7 +39,7 @@ binary, which rewrites `kustomization.yaml` in place:
 
 ```bash
 kustomize edit set image \
-  quay.io/opendatahub/llm-d-kv-cache=quay.io/opendatahub/llm-d-kv-cache:odh-pr-go-<full-commit-sha>
+  quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor=quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor:odh-pr-go-<full-commit-sha>
 ```
 
 The Deployment pulls the image on every Pod start (`imagePullPolicy: Always`),

@@ -17,5 +17,5 @@ configMapGenerator:
 # This is the only place that sets the image tag. To use another tag, change
 # newTag, or run `kustomize edit set image` in this directory.
 images:
-- name: quay.io/opendatahub/llm-d-kv-cache
+- name: quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor
   newTag: odh-stable-go

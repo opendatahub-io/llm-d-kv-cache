@@ -32,7 +32,7 @@ spec:
       containers:
       - name: pvc-evictor
         # The tag is set by the images entry in kustomization.yaml.
-        image: quay.io/opendatahub/llm-d-kv-cache
+        image: quay.io/opendatahub/odh-llm-d-kv-cache-pvc-evictor
         # The odh-stable-go tag is replaced on every build, so always pull.
         imagePullPolicy: Always
         securityContext:
