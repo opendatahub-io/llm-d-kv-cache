@@ -18,7 +18,13 @@ import (
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/filemeta"
 )
 
-const partialBatchTimeout = 5 * time.Second
+const (
+	partialBatchTimeout     = 5 * time.Second
+	modelMetadataRetryDelay = 5 * time.Second
+	modelMetadataRetryCount = 3
+)
+
+var metadataRetryDelay = modelMetadataRetryDelay
 
 type EventPublisher interface {
 	PublishBlocksRemoved(ctx context.Context, blockHashes []uint64, modelName string) error
@@ -151,6 +157,19 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 				parentModTimes[parent] = filemeta.DirModTime(parent)
 			}
 		}
+		var (
+			blockHash   uint64
+			blockHashOK bool
+			modelName   string
+			modelNameOK bool
+		)
+		if d.publisher != nil {
+			blockHash, blockHashOK = blockHashFromPath(path)
+			if blockHashOK {
+				modelName, modelNameOK = d.modelNameWithRetry(ctx, path, logger)
+			}
+		}
+
 		if err := os.Remove(path); err != nil {
 			if !os.IsNotExist(err) {
 				logger.Warn("Cannot delete cache file", slog.String("path", path), slog.Any("error", err))
@@ -167,12 +186,8 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 			parents[parent] = struct{}{}
 		}
 
-		if d.publisher != nil {
-			if blockHash, ok := blockHashFromPath(path); ok {
-				if modelName, ok := d.modelName(path); ok {
-					events[modelName] = append(events[modelName], blockHash)
-				}
-			}
+		if d.publisher != nil && blockHashOK && modelNameOK {
+			events[modelName] = append(events[modelName], blockHash)
 		}
 	}
 
@@ -183,9 +198,11 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 		case <-ctx.Done():
 		}
 	}
-	for modelName, hashes := range events {
-		if err := d.publisher.PublishBlocksRemoved(ctx, hashes, modelName); err != nil {
-			logger.Warn("Cannot publish BlockRemoved event", slog.String("model", modelName), slog.Any("error", err))
+	if d.publisher != nil {
+		for modelName, hashes := range events {
+			if err := d.publisher.PublishBlocksRemoved(ctx, hashes, modelName); err != nil {
+				logger.Warn("Cannot publish BlockRemoved event", slog.String("model", modelName), slog.Any("error", err))
+			}
 		}
 	}
 
@@ -266,6 +283,37 @@ func blockHashFromPath(path string) (uint64, bool) {
 var rankDirPattern = regexp.MustCompile(`^(.+)_r\d+$`)
 
 func (d *Deleter) modelName(path string) (string, bool) {
+	configPath, ok := d.modelConfigPath(path)
+	if !ok {
+		return "", false
+	}
+	baseDir := filepath.Dir(configPath)
+	if value, ok := d.modelNames.Load(baseDir); ok {
+		modelName, ok := value.(string)
+		if !ok {
+			return "", false
+		}
+		return modelName, modelName != ""
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", false
+	}
+	var metadata struct {
+		ModelName string `json:"model_name"`
+	}
+	if err := json.Unmarshal(data, &metadata); err != nil {
+		return "", false
+	}
+	if metadata.ModelName == "" {
+		return "", false
+	}
+	d.modelNames.Store(baseDir, metadata.ModelName)
+	return metadata.ModelName, true
+}
+
+func (d *Deleter) modelConfigPath(path string) (string, bool) {
 	relative, err := filepath.Rel(d.cachePath, path)
 	if err != nil {
 		return "", false
@@ -278,27 +326,33 @@ func (d *Deleter) modelName(path string) (string, bool) {
 	if match == nil {
 		return "", false
 	}
-	baseDir := filepath.Join(d.cachePath, match[1])
-	if value, ok := d.modelNames.Load(baseDir); ok {
-		modelName, ok := value.(string)
-		if !ok {
+	return filepath.Join(d.cachePath, match[1], "config.json"), true
+}
+
+func (d *Deleter) modelNameWithRetry(ctx context.Context, path string, logger *slog.Logger) (string, bool) {
+	configPath, _ := d.modelConfigPath(path)
+	for attempt := 0; attempt <= modelMetadataRetryCount; attempt++ {
+		if modelName, ok := d.modelName(path); ok {
+			return modelName, true
+		}
+		if attempt == modelMetadataRetryCount {
+			logger.Error(
+				"Disabling storage event publishing because config.json is unavailable",
+				slog.String("configFile", configPath),
+				slog.String("cacheFile", path),
+				slog.Int("retries", modelMetadataRetryCount),
+			)
+			d.publisher = nil
 			return "", false
 		}
-		return modelName, modelName != ""
-	}
 
-	data, err := os.ReadFile(filepath.Join(baseDir, "config.json"))
-	if err != nil {
-		d.modelNames.Store(baseDir, "")
-		return "", false
+		timer := time.NewTimer(metadataRetryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", false
+		case <-timer.C:
+		}
 	}
-	var metadata struct {
-		ModelName string `json:"model_name"`
-	}
-	if err := json.Unmarshal(data, &metadata); err != nil {
-		d.modelNames.Store(baseDir, "")
-		return "", false
-	}
-	d.modelNames.Store(baseDir, metadata.ModelName)
-	return metadata.ModelName, metadata.ModelName != ""
+	return "", false
 }

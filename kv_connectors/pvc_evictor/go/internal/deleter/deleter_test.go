@@ -300,6 +300,37 @@ func TestModelName(t *testing.T) {
 	}
 }
 
+func TestFlushDisablesEventsAfterMetadataRetries(t *testing.T) {
+	originalRetryDelay := metadataRetryDelay
+	metadataRetryDelay = 0
+	t.Cleanup(func() { metadataRetryDelay = originalRetryDelay })
+
+	root := t.TempDir()
+	bucket := filepath.Join(root, "cache", "model_r0", "abc", "de_g0")
+	if err := os.MkdirAll(bucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(bucket, "0000000000000001.bin")
+	if err := os.WriteFile(filePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	publisher := &recordingPublisher{hashes: map[string][]uint64{}}
+	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache"}
+	deleter := New(cfg, publisher)
+	deleter.flush(context.Background(), []string{filePath}, make(chan string, 1), slog.New(slog.DiscardHandler))
+
+	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
+		t.Fatalf("file still exists after deletion: %v", err)
+	}
+	if deleter.publisher != nil {
+		t.Fatal("publisher remains enabled after metadata retries failed")
+	}
+	if len(publisher.hashes) != 0 {
+		t.Fatalf("published hashes = %v, want none", publisher.hashes)
+	}
+}
+
 func TestIntervalForRate(t *testing.T) {
 	tests := []struct {
 		name string
