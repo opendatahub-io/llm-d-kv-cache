@@ -18,8 +18,22 @@ import (
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/events"
 )
 
+const (
+	cacheRootWaitTimeout  = 5 * time.Minute
+	cacheRootPollInterval = 30 * time.Second
+)
+
+var (
+	cacheRootWaitTimeoutValue  = cacheRootWaitTimeout
+	cacheRootPollIntervalValue = cacheRootPollInterval
+)
+
 func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	if err := waitForMount(ctx, cfg.PVCMountPath, logger); err != nil {
+		return err
+	}
+	cachePath := filepath.Join(cfg.PVCMountPath, cfg.CacheDirectory)
+	if err := waitForCacheRoot(ctx, cachePath, logger); err != nil {
 		return err
 	}
 
@@ -58,8 +72,6 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	deletionActive := &atomic.Bool{}
 
 	var workers sync.WaitGroup
-	cachePath := filepath.Join(cfg.PVCMountPath, cfg.CacheDirectory)
-
 	for workerID, moduloRange := range crawler.HexModuloRanges(cfg.NumCrawlerProcesses) {
 		workerID := workerID
 		moduloRange := moduloRange
@@ -93,6 +105,47 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 
 	workers.Wait()
 	return nil
+}
+
+func waitForCacheRoot(ctx context.Context, path string, logger *slog.Logger) error {
+	deadline := time.Now().Add(cacheRootWaitTimeoutValue)
+	waiting := false
+
+	for {
+		if _, err := os.Stat(path); err == nil {
+			if waiting {
+				logger.Info("Cache root is available; crawler starting", slog.String("path", path))
+			}
+			return nil
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("cannot access cache root %q: %w", path, err)
+		}
+
+		if !waiting {
+			logger.Warn(
+				"Waiting for vLLM cache root",
+				slog.String("path", path),
+				slog.Duration("timeout", cacheRootWaitTimeoutValue),
+			)
+			waiting = true
+		}
+		if time.Now().After(deadline) {
+			logger.Error(
+				"Cache root did not appear before timeout; stopping evictor",
+				slog.String("path", path),
+				slog.Duration("timeout", cacheRootWaitTimeoutValue),
+			)
+			return fmt.Errorf("cache root %q was not available after %s: %w", path, cacheRootWaitTimeoutValue, os.ErrNotExist)
+		}
+
+		timer := time.NewTimer(cacheRootPollIntervalValue)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+	}
 }
 
 func startSupervisedWorker(

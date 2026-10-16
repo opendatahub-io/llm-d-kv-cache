@@ -57,14 +57,18 @@ func Run(
 	stats := Stats{}
 	rescanDelay := rescanDelayMin
 	lastStatus := time.Now()
+	cacheRootMissingLogged := false
 
 	for {
 		queuedBeforeSweep := stats.Queued
-		if err := scan(ctx, cfg, cachePath, moduloRange, deletionActive, fileQueue, folderQueue, &stats, logger); err != nil {
+		err := scan(ctx, cfg, cachePath, moduloRange, deletionActive, fileQueue, folderQueue, &stats, logger)
+		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
 			}
-			logger.Error("Crawler scan failed", slog.Any("error", err))
+			cacheRootMissingLogged = logScanError(logger, err, cachePath, moduloRange, cacheRootMissingLogged)
+		} else {
+			cacheRootMissingLogged = false
 		}
 		rescanDelay = nextRescanDelay(rescanDelay, stats.Queued-queuedBeforeSweep)
 
@@ -89,6 +93,25 @@ func Run(
 		case <-time.After(rescanDelay):
 		}
 	}
+}
+
+func logScanError(logger *slog.Logger, err error, cachePath string, moduloRange [2]int, missingLogged bool) bool {
+	if !os.IsNotExist(err) {
+		logger.Error("Crawler scan failed", slog.Any("error", err))
+		return missingLogged
+	}
+	if !missingLogged && moduloRange[0] == 0 {
+		logger.Error("Cache root is unavailable; crawler will retry",
+			slog.String("path", cachePath),
+			slog.Any("error", err),
+		)
+		missingLogged = true
+	}
+	logger.Debug("Cache root is not available yet; retrying",
+		slog.String("path", cachePath),
+		slog.Any("error", err),
+	)
+	return missingLogged
 }
 
 func scan(

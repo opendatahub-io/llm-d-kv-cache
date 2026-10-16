@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -31,6 +32,53 @@ func TestWaitForMountCanceled(t *testing.T) {
 
 	if err := waitForMount(ctx, path, testLogger()); !errors.Is(err, context.Canceled) {
 		t.Fatalf("waitForMount() = %v, want context.Canceled", err)
+	}
+}
+
+func TestWaitForCacheRootReady(t *testing.T) {
+	path := t.TempDir()
+
+	if err := waitForCacheRoot(context.Background(), path, testLogger()); err != nil {
+		t.Fatalf("waitForCacheRoot() = %v, want nil", err)
+	}
+}
+
+func TestWaitForCacheRootAppearsBeforeTimeout(t *testing.T) {
+	oldTimeout := cacheRootWaitTimeoutValue
+	oldPollInterval := cacheRootPollIntervalValue
+	cacheRootWaitTimeoutValue = time.Second
+	cacheRootPollIntervalValue = time.Millisecond
+	t.Cleanup(func() {
+		cacheRootWaitTimeoutValue = oldTimeout
+		cacheRootPollIntervalValue = oldPollInterval
+	})
+
+	path := filepath.Join(t.TempDir(), "cache")
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		if err := os.Mkdir(path, 0o750); err != nil {
+			t.Errorf("Mkdir() = %v", err)
+		}
+	}()
+
+	if err := waitForCacheRoot(context.Background(), path, testLogger()); err != nil {
+		t.Fatalf("waitForCacheRoot() = %v, want nil", err)
+	}
+}
+
+func TestWaitForCacheRootTimesOut(t *testing.T) {
+	oldTimeout := cacheRootWaitTimeoutValue
+	oldPollInterval := cacheRootPollIntervalValue
+	cacheRootWaitTimeoutValue = 10 * time.Millisecond
+	cacheRootPollIntervalValue = time.Millisecond
+	t.Cleanup(func() {
+		cacheRootWaitTimeoutValue = oldTimeout
+		cacheRootPollIntervalValue = oldPollInterval
+	})
+
+	path := filepath.Join(t.TempDir(), "missing-cache")
+	if err := waitForCacheRoot(context.Background(), path, testLogger()); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("waitForCacheRoot() = %v, want os.ErrNotExist", err)
 	}
 }
 
