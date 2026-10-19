@@ -9,7 +9,6 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -63,24 +62,16 @@ func newLogger(cfg *config.Config) (*slog.Logger, func(), error) {
 	closeFn := func() {}
 
 	if cfg.LogFilePath != "" {
-		logRoot, err := os.OpenRoot(filepath.Dir(cfg.LogFilePath))
-		if err != nil {
-			return nil, nil, fmt.Errorf("open LOG_FILE_PATH directory: %w", err)
-		}
-		file, err := logRoot.OpenFile(
-			filepath.Base(cfg.LogFilePath),
+		file, err := os.OpenFile( //nolint:gosec // LOG_FILE_PATH is operator-controlled.
+			cfg.LogFilePath,
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND,
 			0o600,
 		)
 		if err != nil {
-			_ = logRoot.Close()
 			return nil, nil, fmt.Errorf("open LOG_FILE_PATH: %w", err)
 		}
 		writers = append(writers, file)
-		closeFn = func() {
-			_ = file.Close()
-			_ = logRoot.Close()
-		}
+		closeFn = func() { _ = file.Close() }
 	}
 
 	handler := slog.NewTextHandler(io.MultiWriter(writers...), &slog.HandlerOptions{Level: level})
