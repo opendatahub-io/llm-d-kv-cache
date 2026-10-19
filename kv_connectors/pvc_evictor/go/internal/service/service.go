@@ -16,6 +16,7 @@ import (
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/deleter"
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/disk"
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/events"
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
 
 const (
@@ -70,6 +71,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 		folderQueue = make(chan string, cfg.FileQueueMaxSize)
 	}
 	deletionActive := &atomic.Bool{}
+	pendingFilePaths := pending.NewPaths()
 
 	var workers sync.WaitGroup
 	for workerID, moduloRange := range crawler.HexModuloRanges(cfg.NumCrawlerProcesses) {
@@ -84,6 +86,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 				deletionActive,
 				fileQueue,
 				folderQueue,
+				pendingFilePaths,
 				workerLogger,
 			)
 		})
@@ -94,7 +97,7 @@ func Run(ctx context.Context, cfg *config.Config, logger *slog.Logger) error {
 	})
 
 	startSupervisedWorker(runCtx, &workers, logger, "deleter", func(ctx context.Context) error {
-		return deleter.New(cfg, publisher).Run(ctx, deletionActive, fileQueue, folderQueue, logger)
+		return deleter.New(cfg, publisher, pendingFilePaths).Run(ctx, deletionActive, fileQueue, folderQueue, logger)
 	})
 
 	if cfg.EnableDirCleanup {

@@ -12,7 +12,13 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/config"
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
+
+func newTestDeleter(cfg *config.Config, publisher EventPublisher) (*Deleter, *pending.Paths) {
+	pendingPaths := pending.NewPaths()
+	return New(cfg, publisher, pendingPaths), pendingPaths
+}
 
 func TestFlushDeletesFileAndQueuesParent(t *testing.T) {
 	root := t.TempDir()
@@ -26,7 +32,7 @@ func TestFlushDeletesFileAndQueuesParent(t *testing.T) {
 	}
 
 	cfg := config.Config{PVCMountPath: root, CacheDirectory: "cache"}
-	deleter := New(&cfg, nil)
+	deleter, _ := newTestDeleter(&cfg, nil)
 	folderQueue := make(chan string, 1)
 	deleter.flush(context.Background(), []string{filePath}, folderQueue, slog.New(slog.DiscardHandler))
 
@@ -57,7 +63,7 @@ func TestFlushDoesNotQueueRecentlyModifiedParent(t *testing.T) {
 		DirCleanupTTL:           time.Hour,
 		FileAccessTimeThreshold: 0,
 	}
-	deleter := New(cfg, nil)
+	deleter, _ := newTestDeleter(cfg, nil)
 	folderQueue := make(chan string, 1)
 	deleter.flush(context.Background(), []string{filePath}, folderQueue, slog.New(slog.DiscardHandler))
 
@@ -89,7 +95,7 @@ func TestFlushQueuesOldParentBeforeDeletionUpdatesMtime(t *testing.T) {
 		DirCleanupTTL:           time.Minute,
 		FileAccessTimeThreshold: 0,
 	}
-	deleter := New(cfg, nil)
+	deleter, _ := newTestDeleter(cfg, nil)
 	folderQueue := make(chan string, 1)
 	deleter.flush(context.Background(), []string{filePath}, folderQueue, slog.New(slog.DiscardHandler))
 
@@ -130,7 +136,7 @@ func TestFlushQueuesOldParentOnceForSeveralFiles(t *testing.T) {
 		DirCleanupTTL:           time.Minute,
 		FileAccessTimeThreshold: 0,
 	}
-	deleter := New(cfg, nil)
+	deleter, _ := newTestDeleter(cfg, nil)
 	folderQueue := make(chan string, 2)
 	deleter.flush(context.Background(), batch, folderQueue, slog.New(slog.DiscardHandler))
 
@@ -156,7 +162,7 @@ func TestFlushDryRunKeepsFile(t *testing.T) {
 	}
 
 	cfg := config.Config{PVCMountPath: root, CacheDirectory: "cache", DryRun: true}
-	deleter := New(&cfg, nil)
+	deleter, _ := newTestDeleter(&cfg, nil)
 	deleter.flush(context.Background(), []string{filePath}, make(chan string, 1), slog.New(slog.DiscardHandler))
 
 	if _, err := os.Stat(filePath); err != nil {
@@ -182,7 +188,7 @@ func TestFlushSkipsFileAccessedSinceQueued(t *testing.T) {
 		CacheDirectory:          "cache",
 		FileAccessTimeThreshold: time.Minute,
 	}
-	deleter := New(cfg, nil)
+	deleter, _ := newTestDeleter(cfg, nil)
 	deleter.flush(context.Background(), []string{filePath}, make(chan string, 1), slog.New(slog.DiscardHandler))
 
 	if _, err := os.Stat(filePath); err != nil {
@@ -228,7 +234,7 @@ func TestFlushReportsDeletedFilesWhenStoppedMidBatch(t *testing.T) {
 	// second waits for the pacer, which is stopped by the cancel below.
 	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache", DeletionMaxFilesPerSecond: 1}
 	publisher := &recordingPublisher{hashes: map[string][]uint64{}}
-	deleter := New(cfg, publisher)
+	deleter, _ := newTestDeleter(cfg, publisher)
 	ctx, cancel := context.WithCancel(context.Background())
 	time.AfterFunc(200*time.Millisecond, cancel)
 	defer cancel()
@@ -263,7 +269,7 @@ func TestFlushStopsBeforeDeletingWhenContextIsAlreadyCancelled(t *testing.T) {
 	// The default rate is unlimited, so acquisition must still honor the
 	// canceled context before either file is deleted.
 	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache"}
-	deleter := New(cfg, nil)
+	deleter, _ := newTestDeleter(cfg, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
@@ -293,7 +299,7 @@ func TestModelName(t *testing.T) {
 	}
 
 	cfg := config.Config{PVCMountPath: root, CacheDirectory: "cache"}
-	deleter := New(&cfg, nil)
+	deleter, _ := newTestDeleter(&cfg, nil)
 	modelName, ok := deleter.modelName(filepath.Join(root, "cache", "model_digest_r0", "abc", "de_g0", "hash.bin"))
 	if !ok || modelName != "test-model" {
 		t.Fatalf("model name = %q, %v; want test-model, true", modelName, ok)
@@ -317,7 +323,7 @@ func TestFlushDisablesEventsAfterMetadataRetries(t *testing.T) {
 
 	publisher := &recordingPublisher{hashes: map[string][]uint64{}}
 	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache"}
-	deleter := New(cfg, publisher)
+	deleter, _ := newTestDeleter(cfg, publisher)
 	deleter.flush(context.Background(), []string{filePath}, make(chan string, 1), slog.New(slog.DiscardHandler))
 
 	if _, err := os.Stat(filePath); !os.IsNotExist(err) {
@@ -367,7 +373,7 @@ func TestIntervalForRate(t *testing.T) {
 // front. Reserving 2^40 strings crashes the process with an out-of-memory error.
 func TestRunDoesNotReserveMemoryForHugeBatchSize(t *testing.T) {
 	cfg := config.Config{PVCMountPath: t.TempDir(), CacheDirectory: "cache", DeletionBatchSize: 1 << 40}
-	deleter := New(&cfg, nil)
+	deleter, _ := newTestDeleter(&cfg, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -383,5 +389,43 @@ func TestRunDoesNotReserveMemoryForHugeBatchSize(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop after the context was cancelled")
+	}
+}
+
+func TestFlushReleasesPendingPath(t *testing.T) {
+	root := t.TempDir()
+	filePath := filepath.Join(root, "cache", "model_r0", "abc", "de_g0", "0000000000000000.bin")
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache"}
+	deleter, pendingPaths := newTestDeleter(cfg, nil)
+	if !pendingPaths.Add(filePath) {
+		t.Fatal("pending path was already claimed")
+	}
+
+	deleter.flush(context.Background(), []string{filePath}, make(chan string, 1), slog.New(slog.DiscardHandler))
+
+	if got := pendingPaths.Len(); got != 0 {
+		t.Fatalf("pending paths after flush = %d, want 0", got)
+	}
+}
+
+func TestReleasePathsAllowsCrawlerToQueueAgain(t *testing.T) {
+	cfg := &config.Config{PVCMountPath: t.TempDir(), CacheDirectory: "cache"}
+	deleter, pendingPaths := newTestDeleter(cfg, nil)
+	path := "/cache/model_r0/abc/de_g0/0000000000000000.bin"
+	if !pendingPaths.Add(path) {
+		t.Fatal("pending path was already claimed")
+	}
+
+	deleter.releasePaths([]string{path})
+
+	if !pendingPaths.Add(path) {
+		t.Fatal("path remained pending after release")
 	}
 }

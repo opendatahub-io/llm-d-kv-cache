@@ -14,6 +14,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/config"
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/filemeta"
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
 
 const (
@@ -25,11 +26,12 @@ const (
 )
 
 type Stats struct {
-	Discovered int
-	Queued     int
-	SkippedHot int
-	StatErrors int
-	EmptyDirs  int
+	Discovered     int
+	Queued         int
+	SkippedHot     int
+	StatErrors     int
+	EmptyDirs      int
+	DuplicatePaths int
 }
 
 func HexModuloRanges(count int) [][2]int {
@@ -51,6 +53,7 @@ func Run(
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
+	pendingPaths *pending.Paths,
 	logger *slog.Logger,
 ) error {
 	cachePath := filepath.Join(cfg.PVCMountPath, cfg.CacheDirectory)
@@ -61,7 +64,18 @@ func Run(
 
 	for {
 		queuedBeforeSweep := stats.Queued
-		err := scan(ctx, cfg, cachePath, moduloRange, deletionActive, fileQueue, folderQueue, &stats, logger)
+		err := scan(
+			ctx,
+			cfg,
+			cachePath,
+			moduloRange,
+			deletionActive,
+			fileQueue,
+			folderQueue,
+			pendingPaths,
+			&stats,
+			logger,
+		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
@@ -82,6 +96,7 @@ func Run(
 				slog.Int("skippedHot", stats.SkippedHot),
 				slog.Int("statErrors", stats.StatErrors),
 				slog.Int("emptyDirsQueued", stats.EmptyDirs),
+				slog.Int("duplicatePathsSkipped", stats.DuplicatePaths),
 				slog.Int("queueSize", len(fileQueue)),
 			)
 		}
@@ -122,6 +137,7 @@ func scan(
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
+	pendingPaths *pending.Paths,
 	stats *Stats,
 	logger *slog.Logger,
 ) error {
@@ -143,7 +159,7 @@ func scan(
 		// processRankDir reads each directory once. It returns true for rank
 		// directories, including empty flat rank directories, so WalkDir does
 		// not traverse their contents again.
-		if processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, stats) {
+		if processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, pendingPaths, stats) {
 			return fs.SkipDir
 		}
 		return nil
@@ -158,6 +174,7 @@ func processRankDir(
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
+	pendingPaths *pending.Paths,
 	stats *Stats,
 ) bool {
 	firstEntries, err := os.ReadDir(rankPath)
@@ -216,7 +233,15 @@ func processRankDir(
 					continue
 				}
 				hasBinFile = true
-				offerFile(ctx, cfg, filepath.Join(secondPath, binEntry.Name()), deletionActive, fileQueue, stats)
+				offerFile(
+					ctx,
+					cfg,
+					filepath.Join(secondPath, binEntry.Name()),
+					deletionActive,
+					fileQueue,
+					pendingPaths,
+					stats,
+				)
 			}
 			if !hasBinFile {
 				offerFolder(ctx, folderQueue, secondPath, cfg.DirCleanupTTL, stats)
@@ -245,6 +270,7 @@ func offerFile(
 	path string,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
+	pendingPaths *pending.Paths,
 	stats *Stats,
 ) {
 	if !waitForQueueSlot(ctx, deletionActive, fileQueue, cfg.FileQueueMinSize, cfg.FileQueueMaxSize) {
@@ -252,6 +278,10 @@ func offerFile(
 	}
 
 	stats.Discovered++
+	if pendingPaths.Contains(path) {
+		stats.DuplicatePaths++
+		return
+	}
 	fileInfo, err := filemeta.Stat(path)
 	if err != nil {
 		stats.StatErrors++
@@ -262,12 +292,18 @@ func offerFile(
 		return
 	}
 
+	if !pendingPaths.Add(path) {
+		stats.DuplicatePaths++
+		return
+	}
+
 	for {
 		select {
 		case fileQueue <- path:
 			stats.Queued++
 			return
 		case <-ctx.Done():
+			pendingPaths.Remove(path)
 			return
 		case <-time.After(queuePollInterval):
 		}

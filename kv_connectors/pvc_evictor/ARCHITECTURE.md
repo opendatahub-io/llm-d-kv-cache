@@ -105,6 +105,10 @@ graph TB
     Clean -..->|remove empty dirs| PVC
 ```
 
+Crawlers and the deleter share a pending-path set. A crawler claims a cold file before putting its path in `fileQueue`;
+repeated sweeps skip that path while it is queued or in the deleter's batch. The deleter releases the path after the
+batch is flushed, or when deletion turns off and discards an unfinished batch.
+
 ## Legacy Python Process Details
 
 ### Process Roles

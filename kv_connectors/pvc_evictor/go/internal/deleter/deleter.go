@@ -16,6 +16,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/config"
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/filemeta"
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
 
 const (
@@ -36,16 +37,18 @@ type Deleter struct {
 	publisher    EventPublisher
 	modelNames   sync.Map
 	pacer        *deletionPacer
+	pendingPaths *pending.Paths
 	filesDeleted atomic.Uint64
 	bytesFreed   atomic.Uint64
 }
 
-func New(cfg *config.Config, publisher EventPublisher) *Deleter {
+func New(cfg *config.Config, publisher EventPublisher, pendingPaths *pending.Paths) *Deleter {
 	return &Deleter{
-		cfg:       cfg,
-		cachePath: filepath.Join(cfg.PVCMountPath, cfg.CacheDirectory),
-		publisher: publisher,
-		pacer:     newDeletionPacer(cfg.DeletionMaxFilesPerSecond),
+		cfg:          cfg,
+		cachePath:    filepath.Join(cfg.PVCMountPath, cfg.CacheDirectory),
+		publisher:    publisher,
+		pacer:        newDeletionPacer(cfg.DeletionMaxFilesPerSecond),
+		pendingPaths: pendingPaths,
 	}
 }
 
@@ -63,6 +66,9 @@ func (d *Deleter) Run(
 	// A partial batch is flushed once it is partialBatchTimeout old, so a
 	// slow trickle of files cannot hold it back until the batch is full.
 	batchStarted := time.Now()
+	defer func() {
+		d.releasePaths(batch)
+	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	statusTicker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -70,6 +76,7 @@ func (d *Deleter) Run(
 
 	for {
 		if !deletionActive.Load() {
+			d.releasePaths(batch)
 			batch = batch[:0]
 			select {
 			case <-ctx.Done():
@@ -114,6 +121,8 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 	if len(batch) == 0 {
 		return
 	}
+	defer d.releasePaths(batch)
+
 	if d.cfg.DryRun {
 		d.filesDeleted.Add(uint64(len(batch)))
 		logger.Debug("Dry-run deletion batch", slog.Int("files", len(batch)))
@@ -208,6 +217,12 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 
 	d.filesDeleted.Add(filesDeleted)
 	d.bytesFreed.Add(bytesFreed)
+}
+
+func (d *Deleter) releasePaths(paths []string) {
+	for _, path := range paths {
+		d.pendingPaths.Remove(path)
+	}
 }
 
 type deletionPacer struct {
