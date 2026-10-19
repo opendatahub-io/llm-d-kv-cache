@@ -34,22 +34,47 @@ type Stats struct {
 	DuplicatePaths int
 }
 
-func HexModuloRanges(count int) [][2]int {
+func HexModuloRanges(count int) [][2]uint64 {
 	if !validCount(count) {
 		return nil
 	}
-	valuesPerCrawler := hexModuloBase / count
-	ranges := make([][2]int, count)
-	for i := range ranges {
-		ranges[i] = [2]int{i * valuesPerCrawler, (i+1)*valuesPerCrawler - 1}
+	switch count {
+	case 1:
+		return [][2]uint64{{0, 15}}
+	case 2:
+		return [][2]uint64{{0, 7}, {8, 15}}
+	case 4:
+		return [][2]uint64{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
+	case 8:
+		return [][2]uint64{{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}, {10, 11}, {12, 13}, {14, 15}}
+	case 16:
+		return [][2]uint64{
+			{0, 0},
+			{1, 1},
+			{2, 2},
+			{3, 3},
+			{4, 4},
+			{5, 5},
+			{6, 6},
+			{7, 7},
+			{8, 8},
+			{9, 9},
+			{10, 10},
+			{11, 11},
+			{12, 12},
+			{13, 13},
+			{14, 14},
+			{15, 15},
+		}
+	default:
+		return nil
 	}
-	return ranges
 }
 
 func Run(
 	ctx context.Context,
 	cfg *config.Config,
-	moduloRange [2]int,
+	moduloRange [2]uint64,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
@@ -110,7 +135,7 @@ func Run(
 	}
 }
 
-func logScanError(logger *slog.Logger, err error, cachePath string, moduloRange [2]int, missingLogged bool) bool {
+func logScanError(logger *slog.Logger, err error, cachePath string, moduloRange [2]uint64, missingLogged bool) bool {
 	if !os.IsNotExist(err) {
 		logger.Error("Crawler scan failed", slog.Any("error", err))
 		return missingLogged
@@ -133,7 +158,7 @@ func scan(
 	ctx context.Context,
 	cfg *config.Config,
 	cachePath string,
-	moduloRange [2]int,
+	moduloRange [2]uint64,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
@@ -170,7 +195,7 @@ func processRankDir(
 	ctx context.Context,
 	cfg *config.Config,
 	rankPath string,
-	moduloRange [2]int,
+	moduloRange [2]uint64,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
@@ -204,7 +229,7 @@ func processRankDir(
 		hasFirstBucket = true
 		firstPath := filepath.Join(rankPath, firstEntry.Name())
 
-		modulo := int(hexValue % hexModuloBase)
+		modulo := hexValue % hexModuloBase
 		if modulo < moduloRange[0] || modulo > moduloRange[1] {
 			continue
 		}
@@ -363,7 +388,7 @@ func offerFolder(ctx context.Context, folderQueue chan<- string, path string, tt
 	}
 }
 
-func flatRankModulo(path string) (int, bool) {
+func flatRankModulo(path string) (uint64, bool) {
 	name := filepath.Base(path)
 	prefixIndex := strings.LastIndex(name, "_r")
 	if prefixIndex <= 0 || prefixIndex+2 == len(name) {
@@ -373,7 +398,7 @@ func flatRankModulo(path string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	return int(rank % hexModuloBase), true
+	return rank % hexModuloBase, true
 }
 
 func isHexBucketName(name string, minLength, maxLength int) bool {

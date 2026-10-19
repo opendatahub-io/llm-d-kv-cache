@@ -39,7 +39,7 @@ type Deleter struct {
 	pacer        *deletionPacer
 	pendingPaths *pending.Paths
 	filesDeleted atomic.Uint64
-	bytesFreed   atomic.Uint64
+	bytesFreed   atomic.Int64
 }
 
 func New(cfg *config.Config, publisher EventPublisher, pendingPaths *pending.Paths) *Deleter {
@@ -109,7 +109,7 @@ func (d *Deleter) Run(
 		case <-statusTicker.C:
 			logger.Info("Deleter status",
 				slog.Uint64("filesDeleted", d.filesDeleted.Load()),
-				slog.Uint64("bytesFreed", d.bytesFreed.Load()),
+				slog.Int64("bytesFreed", d.bytesFreed.Load()),
 			)
 		}
 	}
@@ -153,7 +153,7 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 	// directory. The crawler removes it on a later sweep.
 	parentModTimes := make(map[string]time.Time)
 	var filesDeleted uint64
-	var bytesFreed uint64
+	var bytesFreed int64
 
 	for _, path := range batch {
 		// On shutdown, stop deleting but still report the files already
@@ -202,7 +202,7 @@ func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- 
 			logger.Warn("Cache file has a negative size", slog.String("path", path), slog.Int64("size", info.Size))
 			continue
 		}
-		bytesFreed += uint64(info.Size) //nolint:gosec // size is checked as non-negative.
+		bytesFreed += info.Size
 		if folderQueue != nil && filemeta.DirCleanupDue(parentModTimes[parent], time.Now(), d.cfg.DirCleanupTTL) {
 			parents[parent] = struct{}{}
 		}
@@ -290,7 +290,7 @@ func (p *deletionPacer) acquire(ctx context.Context) error {
 func (d *Deleter) logStopped(logger *slog.Logger) {
 	logger.Info("Deleter stopped",
 		slog.Uint64("filesDeleted", d.filesDeleted.Load()),
-		slog.Uint64("bytesFreed", d.bytesFreed.Load()),
+		slog.Int64("bytesFreed", d.bytesFreed.Load()),
 	)
 }
 

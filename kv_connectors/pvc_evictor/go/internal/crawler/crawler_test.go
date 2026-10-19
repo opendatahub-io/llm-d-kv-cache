@@ -50,7 +50,7 @@ func TestScanQueuesColdFileAndSkipsHotFile(t *testing.T) {
 		context.Background(),
 		&cfg,
 		filepath.Join(root, "cache"),
-		[2]int{0, 15},
+		[2]uint64{0, 15},
 		&atomic.Bool{},
 		fileQueue,
 		folderQueue,
@@ -100,7 +100,7 @@ func TestScanProcessesRecursiveLayoutWithTwoCharacterBucket(t *testing.T) {
 		context.Background(),
 		&cfg,
 		filepath.Join(root, "cache"),
-		[2]int{0, 15},
+		[2]uint64{0, 15},
 		&atomic.Bool{},
 		fileQueue,
 		make(chan string, 1),
@@ -122,7 +122,7 @@ func TestScanProcessesRecursiveLayoutWithTwoCharacterBucket(t *testing.T) {
 
 func TestHexModuloRanges(t *testing.T) {
 	ranges := HexModuloRanges(4)
-	want := [][2]int{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
+	want := [][2]uint64{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
 	if len(ranges) != len(want) {
 		t.Fatalf("got %d ranges, want %d", len(ranges), len(want))
 	}
@@ -164,7 +164,7 @@ func TestScanOffersEmptyFirstBucketOnlyToOwner(t *testing.T) {
 		context.Background(),
 		cfg,
 		filepath.Join(root, "cache"),
-		[2]int{15, 15},
+		[2]uint64{15, 15},
 		&atomic.Bool{},
 		make(chan string, 10),
 		ownerFolders,
@@ -178,7 +178,7 @@ func TestScanOffersEmptyFirstBucketOnlyToOwner(t *testing.T) {
 		context.Background(),
 		cfg,
 		filepath.Join(root, "cache"),
-		[2]int{12, 12},
+		[2]uint64{12, 12},
 		&atomic.Bool{},
 		make(chan string, 10),
 		otherFolders,
@@ -305,7 +305,7 @@ func TestScanStopsInsideRankDirWhenContextIsCancelled(t *testing.T) {
 	cancel()
 	stats := Stats{}
 
-	processRankDir(ctx, cfg, filepath.Join(root, "cache", "model_digest_r0"), [2]int{0, 15},
+	processRankDir(ctx, cfg, filepath.Join(root, "cache", "model_digest_r0"), [2]uint64{0, 15},
 		&atomic.Bool{}, make(chan string, 10), make(chan string, 10), pending.NewPaths(), &stats)
 	if stats.Discovered != 0 {
 		t.Fatalf("discovered %d files after the context was cancelled", stats.Discovered)
@@ -325,7 +325,7 @@ func TestScanSkipsFoldersWhenDirectoryCleanupIsDisabled(t *testing.T) {
 	}
 	stats := Stats{}
 
-	if err := scan(context.Background(), cfg, filepath.Join(root, "cache"), [2]int{0, 15},
+	if err := scan(context.Background(), cfg, filepath.Join(root, "cache"), [2]uint64{0, 15},
 		&atomic.Bool{}, make(chan string, 10), nil, pending.NewPaths(), &stats, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatal(err)
 	}
@@ -364,7 +364,7 @@ func TestRepeatedScansDoNotQueuePendingPathTwice(t *testing.T) {
 			context.Background(),
 			cfg,
 			filepath.Join(root, "cache"),
-			[2]int{0, 15},
+			[2]uint64{0, 15},
 			&atomic.Bool{},
 			fileQueue,
 			make(chan string, 1),
@@ -391,7 +391,7 @@ func TestRepeatedScansDoNotQueuePendingPathTwice(t *testing.T) {
 		context.Background(),
 		cfg,
 		filepath.Join(root, "cache"),
-		[2]int{0, 15},
+		[2]uint64{0, 15},
 		&atomic.Bool{},
 		fileQueue,
 		make(chan string, 1),
