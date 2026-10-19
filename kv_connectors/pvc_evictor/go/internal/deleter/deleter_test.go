@@ -208,6 +208,12 @@ func (p *recordingPublisher) PublishBlocksRemoved(_ context.Context, blockHashes
 	return nil
 }
 
+type panickingPublisher struct{}
+
+func (p *panickingPublisher) PublishBlocksRemoved(context.Context, []uint64, string) error {
+	panic("publisher failed")
+}
+
 func TestFlushReportsDeletedFilesWhenStoppedMidBatch(t *testing.T) {
 	root := t.TempDir()
 	cachePath := filepath.Join(root, "cache")
@@ -427,5 +433,53 @@ func TestReleasePathsAllowsCrawlerToQueueAgain(t *testing.T) {
 
 	if !pendingPaths.Add(path) {
 		t.Fatal("path remained pending after release")
+	}
+}
+
+func TestFlushBatchKeepsFlushSolePendingPathOwner(t *testing.T) {
+	root := t.TempDir()
+	metadataDir := filepath.Join(root, "cache", "model_digest")
+	if err := os.MkdirAll(metadataDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(metadataDir, "config.json"), []byte(`{"model_name":"test-model"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	bucket := filepath.Join(root, "cache", "model_digest_r0", "abc", "de_g0")
+	if err := os.MkdirAll(bucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	filePath := filepath.Join(bucket, "0000000000000001.bin")
+	if err := os.WriteFile(filePath, []byte("cache"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{PVCMountPath: root, CacheDirectory: "cache"}
+	deleter, pendingPaths := newTestDeleter(cfg, &panickingPublisher{})
+	if !pendingPaths.Add(filePath) {
+		t.Fatal("pending path was already claimed")
+	}
+	batch := []string{filePath}
+
+	func() {
+		defer func() {
+			if recover() == nil {
+				t.Fatal("flush did not panic")
+			}
+		}()
+		deleter.flushBatch(context.Background(), &batch, make(chan string, 1), slog.New(slog.DiscardHandler))
+	}()
+
+	if len(batch) != 0 {
+		t.Fatalf("Run still owns %d paths after flush starts, want 0", len(batch))
+	}
+	if !pendingPaths.Add(filePath) {
+		t.Fatal("crawler could not requeue the path after flush released it")
+	}
+
+	deleter.releasePaths(batch)
+
+	if !pendingPaths.Contains(filePath) {
+		t.Fatal("Run's deferred cleanup removed a path requeued after flush released it")
 	}
 }

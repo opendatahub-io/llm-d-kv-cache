@@ -1,13 +1,15 @@
-package pending
+package pending_test
 
 import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
 
 func TestPathsAddClaimsOnce(t *testing.T) {
-	paths := NewPaths()
+	paths := pending.NewPaths()
 
 	if !paths.Add("/cache/a.bin") {
 		t.Fatal("first Add returned false")
@@ -21,7 +23,7 @@ func TestPathsAddClaimsOnce(t *testing.T) {
 }
 
 func TestPathsRemoveAllowsAddAgain(t *testing.T) {
-	paths := NewPaths()
+	paths := pending.NewPaths()
 	paths.Add("/cache/a.bin")
 	paths.Remove("/cache/a.bin")
 
@@ -31,7 +33,7 @@ func TestPathsRemoveAllowsAddAgain(t *testing.T) {
 }
 
 func TestPathsConcurrentAdds(t *testing.T) {
-	paths := NewPaths()
+	paths := pending.NewPaths()
 	var successes atomic.Int32
 	var workers sync.WaitGroup
 

@@ -91,7 +91,7 @@ func (d *Deleter) Run(
 
 		select {
 		case <-ctx.Done():
-			d.flush(ctx, batch, folderQueue, logger)
+			d.flushBatch(ctx, &batch, folderQueue, logger)
 			d.logStopped(logger)
 			return nil
 		case path := <-fileQueue:
@@ -100,13 +100,11 @@ func (d *Deleter) Run(
 			}
 			batch = append(batch, path)
 			if len(batch) >= d.cfg.DeletionBatchSize {
-				d.flush(ctx, batch, folderQueue, logger)
-				batch = batch[:0]
+				d.flushBatch(ctx, &batch, folderQueue, logger)
 			}
 		case <-ticker.C:
 			if len(batch) > 0 && time.Since(batchStarted) >= partialBatchTimeout {
-				d.flush(ctx, batch, folderQueue, logger)
-				batch = batch[:0]
+				d.flushBatch(ctx, &batch, folderQueue, logger)
 			}
 		case <-statusTicker.C:
 			logger.Info("Deleter status",
@@ -115,6 +113,20 @@ func (d *Deleter) Run(
 			)
 		}
 	}
+}
+
+// flushBatch gives flush sole ownership of the batch. Run must clear its
+// reference first; otherwise its deferred cleanup can release the same paths
+// again if flush panics.
+func (d *Deleter) flushBatch(
+	ctx context.Context,
+	batch *[]string,
+	folderQueue chan<- string,
+	logger *slog.Logger,
+) {
+	paths := *batch
+	*batch = (*batch)[:0]
+	d.flush(ctx, paths, folderQueue, logger)
 }
 
 func (d *Deleter) flush(ctx context.Context, batch []string, folderQueue chan<- string, logger *slog.Logger) {
