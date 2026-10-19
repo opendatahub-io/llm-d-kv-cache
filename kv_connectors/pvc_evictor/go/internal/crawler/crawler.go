@@ -140,11 +140,10 @@ func scan(
 			return nil
 		}
 
-		// An empty flat rank directory has no hex bucket, but it still needs
-		// to be offered to the folder cleaner. Directories with hex buckets
-		// keep the existing recursive-layout support.
-		if _, ok := flatRankModulo(path); ok || containsHexBucket(path) {
-			processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, stats)
+		// processRankDir reads each directory once. It returns true for rank
+		// directories, including empty flat rank directories, so WalkDir does
+		// not traverse their contents again.
+		if processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, stats) {
 			return fs.SkipDir
 		}
 		return nil
@@ -160,15 +159,23 @@ func processRankDir(
 	fileQueue chan<- string,
 	folderQueue chan<- string,
 	stats *Stats,
-) {
+) bool {
 	firstEntries, err := os.ReadDir(rankPath)
 	if err != nil {
-		return
+		return false
 	}
+
+	_, isFlatRankDir := flatRankModulo(rankPath)
+	isRankDir := isFlatRankDir
 	hasFirstBucket := false
 	for _, firstEntry := range firstEntries {
 		if ctx.Err() != nil {
-			return
+			return isRankDir
+		}
+
+		// Recursive layouts can use a 2-4 character first-level hex bucket.
+		if firstEntry.IsDir() && isHexBucketName(firstEntry.Name(), 2, 4) {
+			isRankDir = true
 		}
 		if !firstEntry.IsDir() || len(firstEntry.Name()) != cfg.HexBucketLen {
 			continue
@@ -182,10 +189,6 @@ func processRankDir(
 
 		modulo := int(hexValue % hexModuloBase)
 		if modulo < moduloRange[0] || modulo > moduloRange[1] {
-			continue
-		}
-		if isEmptyDir(firstPath) {
-			offerFolder(ctx, folderQueue, firstPath, cfg.DirCleanupTTL, stats)
 			continue
 		}
 
@@ -207,7 +210,7 @@ func processRankDir(
 			}
 			for _, binEntry := range binEntries {
 				if ctx.Err() != nil {
-					return
+					return isRankDir
 				}
 				if binEntry.IsDir() || !strings.HasSuffix(binEntry.Name(), ".bin") {
 					continue
@@ -223,12 +226,17 @@ func processRankDir(
 			offerFolder(ctx, folderQueue, firstPath, cfg.DirCleanupTTL, stats)
 		}
 	}
+
+	if !isRankDir {
+		return false
+	}
 	if !hasFirstBucket {
 		if modulo, ok := flatRankModulo(rankPath); ok && (modulo < moduloRange[0] || modulo > moduloRange[1]) {
-			return
+			return true
 		}
 		offerFolder(ctx, folderQueue, rankPath, cfg.DirCleanupTTL, stats)
 	}
+	return true
 }
 
 func offerFile(
@@ -319,22 +327,6 @@ func offerFolder(ctx context.Context, folderQueue chan<- string, path string, tt
 	}
 }
 
-func containsHexBucket(path string) bool {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) < 2 || len(entry.Name()) > 4 {
-			continue
-		}
-		if _, err := strconv.ParseUint(entry.Name(), 16, 64); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
 func flatRankModulo(path string) (int, bool) {
 	name := filepath.Base(path)
 	prefixIndex := strings.LastIndex(name, "_r")
@@ -348,9 +340,12 @@ func flatRankModulo(path string) (int, bool) {
 	return int(rank % hexModuloBase), true
 }
 
-func isEmptyDir(path string) bool {
-	entries, err := os.ReadDir(path)
-	return err == nil && len(entries) == 0
+func isHexBucketName(name string, minLength, maxLength int) bool {
+	if len(name) < minLength || len(name) > maxLength {
+		return false
+	}
+	_, err := strconv.ParseUint(name, 16, 64)
+	return err == nil
 }
 
 func validCount(count int) bool {

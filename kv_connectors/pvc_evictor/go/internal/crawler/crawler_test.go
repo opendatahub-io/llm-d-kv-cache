@@ -68,6 +68,55 @@ func TestScanQueuesColdFileAndSkipsHotFile(t *testing.T) {
 	}
 }
 
+func TestScanProcessesRecursiveLayoutWithTwoCharacterBucket(t *testing.T) {
+	root := t.TempDir()
+	rankDir := filepath.Join(root, "cache", "model", "rank_0", "dtype")
+	secondBucket := filepath.Join(rankDir, "ab", "de_g0")
+	if err := os.MkdirAll(secondBucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	coldFile := filepath.Join(secondBucket, "0000000000000000.bin")
+	writeFile(t, coldFile, "cold")
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(coldFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{
+		PVCMountPath:            root,
+		CacheDirectory:          "cache",
+		FileQueueMaxSize:        10,
+		FileQueueMinSize:        10,
+		FileAccessTimeThreshold: time.Hour,
+		HexBucketLen:            2,
+	}
+	fileQueue := make(chan string, 1)
+	stats := Stats{}
+
+	err := scan(
+		context.Background(),
+		&cfg,
+		filepath.Join(root, "cache"),
+		[2]int{0, 15},
+		&atomic.Bool{},
+		fileQueue,
+		make(chan string, 1),
+		&stats,
+		slog.New(slog.DiscardHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stats.Queued != 1 {
+		t.Fatalf("queued %d files, want 1", stats.Queued)
+	}
+	if got := <-fileQueue; got != coldFile {
+		t.Fatalf("queued %q, want %q", got, coldFile)
+	}
+}
+
 func TestHexModuloRanges(t *testing.T) {
 	ranges := HexModuloRanges(4)
 	want := [][2]int{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
