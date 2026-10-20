@@ -53,7 +53,8 @@ tidy-go:
 
 lint: check-ruff ## Run all linters (Go + Python)
 	@echo "==== Running Go linting ===="
-	@cd $(PVC_EVICTOR_DIR)/go && GOCACHE=/tmp/llm-d-kv-cache-go-build GOLANGCI_LINT_CACHE=/tmp/llm-d-kv-cache-golangci-lint golangci-lint run
+	@golangci-lint run
+	@cd "$(PVC_EVICTOR_DIR)/go" && GOCACHE=/tmp/llm-d-kv-cache-go-build GOLANGCI_LINT_CACHE=/tmp/llm-d-kv-cache-golangci-lint golangci-lint run
 	@echo "==== Running Python linting (ruff) ===="
 	@ruff check .
 
