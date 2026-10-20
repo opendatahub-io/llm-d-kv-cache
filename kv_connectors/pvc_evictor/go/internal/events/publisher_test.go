@@ -92,8 +92,8 @@ func TestCloseDeliversRecentlyQueuedEvents(t *testing.T) {
 		}
 	}()
 
-	for i := range wantEvents {
-		if err := publisher.PublishBlocksRemoved(ctx, []uint64{uint64(i)}, "test-model"); err != nil {
+	for blockHash := range uint64(wantEvents) {
+		if err := publisher.PublishBlocksRemoved(ctx, []uint64{blockHash}, "test-model"); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/config"
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/filemeta"
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
 
 const (
@@ -25,32 +26,59 @@ const (
 )
 
 type Stats struct {
-	Discovered int
-	Queued     int
-	SkippedHot int
-	StatErrors int
-	EmptyDirs  int
+	Discovered     int
+	Queued         int
+	SkippedHot     int
+	StatErrors     int
+	EmptyDirs      int
+	DuplicatePaths int
 }
 
-func HexModuloRanges(count int) [][2]int {
+func HexModuloRanges(count int) [][2]uint64 {
 	if !validCount(count) {
 		return nil
 	}
-	valuesPerCrawler := hexModuloBase / count
-	ranges := make([][2]int, count)
-	for i := range ranges {
-		ranges[i] = [2]int{i * valuesPerCrawler, (i+1)*valuesPerCrawler - 1}
+	switch count {
+	case 1:
+		return [][2]uint64{{0, 15}}
+	case 2:
+		return [][2]uint64{{0, 7}, {8, 15}}
+	case 4:
+		return [][2]uint64{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
+	case 8:
+		return [][2]uint64{{0, 1}, {2, 3}, {4, 5}, {6, 7}, {8, 9}, {10, 11}, {12, 13}, {14, 15}}
+	case 16:
+		return [][2]uint64{
+			{0, 0},
+			{1, 1},
+			{2, 2},
+			{3, 3},
+			{4, 4},
+			{5, 5},
+			{6, 6},
+			{7, 7},
+			{8, 8},
+			{9, 9},
+			{10, 10},
+			{11, 11},
+			{12, 12},
+			{13, 13},
+			{14, 14},
+			{15, 15},
+		}
+	default:
+		return nil
 	}
-	return ranges
 }
 
 func Run(
 	ctx context.Context,
 	cfg *config.Config,
-	moduloRange [2]int,
+	moduloRange [2]uint64,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
+	pendingPaths *pending.Paths,
 	logger *slog.Logger,
 ) error {
 	cachePath := filepath.Join(cfg.PVCMountPath, cfg.CacheDirectory)
@@ -61,7 +89,18 @@ func Run(
 
 	for {
 		queuedBeforeSweep := stats.Queued
-		err := scan(ctx, cfg, cachePath, moduloRange, deletionActive, fileQueue, folderQueue, &stats, logger)
+		err := scan(
+			ctx,
+			cfg,
+			cachePath,
+			moduloRange,
+			deletionActive,
+			fileQueue,
+			folderQueue,
+			pendingPaths,
+			&stats,
+			logger,
+		)
 		if err != nil {
 			if errors.Is(err, context.Canceled) {
 				return nil
@@ -82,6 +121,7 @@ func Run(
 				slog.Int("skippedHot", stats.SkippedHot),
 				slog.Int("statErrors", stats.StatErrors),
 				slog.Int("emptyDirsQueued", stats.EmptyDirs),
+				slog.Int("duplicatePathsSkipped", stats.DuplicatePaths),
 				slog.Int("queueSize", len(fileQueue)),
 			)
 		}
@@ -95,7 +135,7 @@ func Run(
 	}
 }
 
-func logScanError(logger *slog.Logger, err error, cachePath string, moduloRange [2]int, missingLogged bool) bool {
+func logScanError(logger *slog.Logger, err error, cachePath string, moduloRange [2]uint64, missingLogged bool) bool {
 	if !os.IsNotExist(err) {
 		logger.Error("Crawler scan failed", slog.Any("error", err))
 		return missingLogged
@@ -118,10 +158,11 @@ func scan(
 	ctx context.Context,
 	cfg *config.Config,
 	cachePath string,
-	moduloRange [2]int,
+	moduloRange [2]uint64,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
+	pendingPaths *pending.Paths,
 	stats *Stats,
 	logger *slog.Logger,
 ) error {
@@ -140,11 +181,10 @@ func scan(
 			return nil
 		}
 
-		// An empty flat rank directory has no hex bucket, but it still needs
-		// to be offered to the folder cleaner. Directories with hex buckets
-		// keep the existing recursive-layout support.
-		if _, ok := flatRankModulo(path); ok || containsHexBucket(path) {
-			processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, stats)
+		// processRankDir reads each directory once. It returns true for rank
+		// directories, including empty flat rank directories, so WalkDir does
+		// not traverse their contents again.
+		if processRankDir(ctx, cfg, path, moduloRange, deletionActive, fileQueue, folderQueue, pendingPaths, stats) {
 			return fs.SkipDir
 		}
 		return nil
@@ -155,20 +195,29 @@ func processRankDir(
 	ctx context.Context,
 	cfg *config.Config,
 	rankPath string,
-	moduloRange [2]int,
+	moduloRange [2]uint64,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
 	folderQueue chan<- string,
+	pendingPaths *pending.Paths,
 	stats *Stats,
-) {
+) bool {
 	firstEntries, err := os.ReadDir(rankPath)
 	if err != nil {
-		return
+		return false
 	}
+
+	_, isFlatRankDir := flatRankModulo(rankPath)
+	isRankDir := isFlatRankDir
 	hasFirstBucket := false
 	for _, firstEntry := range firstEntries {
 		if ctx.Err() != nil {
-			return
+			return isRankDir
+		}
+
+		// Recursive layouts can use a 2-4 character first-level hex bucket.
+		if firstEntry.IsDir() && isHexBucketName(firstEntry.Name(), 2, 4) {
+			isRankDir = true
 		}
 		if !firstEntry.IsDir() || len(firstEntry.Name()) != cfg.HexBucketLen {
 			continue
@@ -180,12 +229,8 @@ func processRankDir(
 		hasFirstBucket = true
 		firstPath := filepath.Join(rankPath, firstEntry.Name())
 
-		modulo := int(hexValue % hexModuloBase)
+		modulo := hexValue % hexModuloBase
 		if modulo < moduloRange[0] || modulo > moduloRange[1] {
-			continue
-		}
-		if isEmptyDir(firstPath) {
-			offerFolder(ctx, folderQueue, firstPath, cfg.DirCleanupTTL, stats)
 			continue
 		}
 
@@ -207,13 +252,21 @@ func processRankDir(
 			}
 			for _, binEntry := range binEntries {
 				if ctx.Err() != nil {
-					return
+					return isRankDir
 				}
 				if binEntry.IsDir() || !strings.HasSuffix(binEntry.Name(), ".bin") {
 					continue
 				}
 				hasBinFile = true
-				offerFile(ctx, cfg, filepath.Join(secondPath, binEntry.Name()), deletionActive, fileQueue, stats)
+				offerFile(
+					ctx,
+					cfg,
+					filepath.Join(secondPath, binEntry.Name()),
+					deletionActive,
+					fileQueue,
+					pendingPaths,
+					stats,
+				)
 			}
 			if !hasBinFile {
 				offerFolder(ctx, folderQueue, secondPath, cfg.DirCleanupTTL, stats)
@@ -223,12 +276,17 @@ func processRankDir(
 			offerFolder(ctx, folderQueue, firstPath, cfg.DirCleanupTTL, stats)
 		}
 	}
+
+	if !isRankDir {
+		return false
+	}
 	if !hasFirstBucket {
 		if modulo, ok := flatRankModulo(rankPath); ok && (modulo < moduloRange[0] || modulo > moduloRange[1]) {
-			return
+			return true
 		}
 		offerFolder(ctx, folderQueue, rankPath, cfg.DirCleanupTTL, stats)
 	}
+	return true
 }
 
 func offerFile(
@@ -237,6 +295,7 @@ func offerFile(
 	path string,
 	deletionActive *atomic.Bool,
 	fileQueue chan<- string,
+	pendingPaths *pending.Paths,
 	stats *Stats,
 ) {
 	if !waitForQueueSlot(ctx, deletionActive, fileQueue, cfg.FileQueueMinSize, cfg.FileQueueMaxSize) {
@@ -244,6 +303,10 @@ func offerFile(
 	}
 
 	stats.Discovered++
+	if pendingPaths.Contains(path) {
+		stats.DuplicatePaths++
+		return
+	}
 	fileInfo, err := filemeta.Stat(path)
 	if err != nil {
 		stats.StatErrors++
@@ -254,12 +317,18 @@ func offerFile(
 		return
 	}
 
+	if !pendingPaths.Add(path) {
+		stats.DuplicatePaths++
+		return
+	}
+
 	for {
 		select {
 		case fileQueue <- path:
 			stats.Queued++
 			return
 		case <-ctx.Done():
+			pendingPaths.Remove(path)
 			return
 		case <-time.After(queuePollInterval):
 		}
@@ -319,23 +388,7 @@ func offerFolder(ctx context.Context, folderQueue chan<- string, path string, tt
 	}
 }
 
-func containsHexBucket(path string) bool {
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		return false
-	}
-	for _, entry := range entries {
-		if !entry.IsDir() || len(entry.Name()) < 2 || len(entry.Name()) > 4 {
-			continue
-		}
-		if _, err := strconv.ParseUint(entry.Name(), 16, 64); err == nil {
-			return true
-		}
-	}
-	return false
-}
-
-func flatRankModulo(path string) (int, bool) {
+func flatRankModulo(path string) (uint64, bool) {
 	name := filepath.Base(path)
 	prefixIndex := strings.LastIndex(name, "_r")
 	if prefixIndex <= 0 || prefixIndex+2 == len(name) {
@@ -345,12 +398,15 @@ func flatRankModulo(path string) (int, bool) {
 	if err != nil {
 		return 0, false
 	}
-	return int(rank % hexModuloBase), true
+	return rank % hexModuloBase, true
 }
 
-func isEmptyDir(path string) bool {
-	entries, err := os.ReadDir(path)
-	return err == nil && len(entries) == 0
+func isHexBucketName(name string, minLength, maxLength int) bool {
+	if len(name) < minLength || len(name) > maxLength {
+		return false
+	}
+	_, err := strconv.ParseUint(name, 16, 64)
+	return err == nil
 }
 
 func validCount(count int) bool {

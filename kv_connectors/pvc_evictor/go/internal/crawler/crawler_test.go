@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/config"
+	"github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go/internal/pending"
 )
 
 func TestScanQueuesColdFileAndSkipsHotFile(t *testing.T) {
@@ -49,10 +50,11 @@ func TestScanQueuesColdFileAndSkipsHotFile(t *testing.T) {
 		context.Background(),
 		&cfg,
 		filepath.Join(root, "cache"),
-		[2]int{0, 15},
+		[2]uint64{0, 15},
 		&atomic.Bool{},
 		fileQueue,
 		folderQueue,
+		pending.NewPaths(),
 		&stats,
 		slog.New(slog.DiscardHandler),
 	)
@@ -68,9 +70,59 @@ func TestScanQueuesColdFileAndSkipsHotFile(t *testing.T) {
 	}
 }
 
+func TestScanProcessesRecursiveLayoutWithTwoCharacterBucket(t *testing.T) {
+	root := t.TempDir()
+	rankDir := filepath.Join(root, "cache", "model", "rank_0", "dtype")
+	secondBucket := filepath.Join(rankDir, "ab", "de_g0")
+	if err := os.MkdirAll(secondBucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	coldFile := filepath.Join(secondBucket, "0000000000000000.bin")
+	writeFile(t, coldFile, "cold")
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(coldFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Config{
+		PVCMountPath:            root,
+		CacheDirectory:          "cache",
+		FileQueueMaxSize:        10,
+		FileQueueMinSize:        10,
+		FileAccessTimeThreshold: time.Hour,
+		HexBucketLen:            2,
+	}
+	fileQueue := make(chan string, 1)
+	stats := Stats{}
+
+	err := scan(
+		context.Background(),
+		&cfg,
+		filepath.Join(root, "cache"),
+		[2]uint64{0, 15},
+		&atomic.Bool{},
+		fileQueue,
+		make(chan string, 1),
+		pending.NewPaths(),
+		&stats,
+		slog.New(slog.DiscardHandler),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if stats.Queued != 1 {
+		t.Fatalf("queued %d files, want 1", stats.Queued)
+	}
+	if got := <-fileQueue; got != coldFile {
+		t.Fatalf("queued %q, want %q", got, coldFile)
+	}
+}
+
 func TestHexModuloRanges(t *testing.T) {
 	ranges := HexModuloRanges(4)
-	want := [][2]int{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
+	want := [][2]uint64{{0, 3}, {4, 7}, {8, 11}, {12, 15}}
 	if len(ranges) != len(want) {
 		t.Fatalf("got %d ranges, want %d", len(ranges), len(want))
 	}
@@ -112,10 +164,11 @@ func TestScanOffersEmptyFirstBucketOnlyToOwner(t *testing.T) {
 		context.Background(),
 		cfg,
 		filepath.Join(root, "cache"),
-		[2]int{15, 15},
+		[2]uint64{15, 15},
 		&atomic.Bool{},
 		make(chan string, 10),
 		ownerFolders,
+		pending.NewPaths(),
 		&stats,
 		slog.New(slog.DiscardHandler),
 	); err != nil {
@@ -125,10 +178,11 @@ func TestScanOffersEmptyFirstBucketOnlyToOwner(t *testing.T) {
 		context.Background(),
 		cfg,
 		filepath.Join(root, "cache"),
-		[2]int{12, 12},
+		[2]uint64{12, 12},
 		&atomic.Bool{},
 		make(chan string, 10),
 		otherFolders,
+		pending.NewPaths(),
 		&stats,
 		slog.New(slog.DiscardHandler),
 	); err != nil {
@@ -171,6 +225,7 @@ func TestScanOffersEmptyFlatRankDirectoryOnceAcrossCrawlers(t *testing.T) {
 			&atomic.Bool{},
 			make(chan string, 10),
 			folderQueue,
+			pending.NewPaths(),
 			&stats,
 			slog.New(slog.DiscardHandler),
 		); err != nil {
@@ -250,8 +305,8 @@ func TestScanStopsInsideRankDirWhenContextIsCancelled(t *testing.T) {
 	cancel()
 	stats := Stats{}
 
-	processRankDir(ctx, cfg, filepath.Join(root, "cache", "model_digest_r0"), [2]int{0, 15},
-		&atomic.Bool{}, make(chan string, 10), make(chan string, 10), &stats)
+	processRankDir(ctx, cfg, filepath.Join(root, "cache", "model_digest_r0"), [2]uint64{0, 15},
+		&atomic.Bool{}, make(chan string, 10), make(chan string, 10), pending.NewPaths(), &stats)
 	if stats.Discovered != 0 {
 		t.Fatalf("discovered %d files after the context was cancelled", stats.Discovered)
 	}
@@ -270,12 +325,87 @@ func TestScanSkipsFoldersWhenDirectoryCleanupIsDisabled(t *testing.T) {
 	}
 	stats := Stats{}
 
-	if err := scan(context.Background(), cfg, filepath.Join(root, "cache"), [2]int{0, 15},
-		&atomic.Bool{}, make(chan string, 10), nil, &stats, slog.New(slog.DiscardHandler)); err != nil {
+	if err := scan(context.Background(), cfg, filepath.Join(root, "cache"), [2]uint64{0, 15},
+		&atomic.Bool{}, make(chan string, 10), nil, pending.NewPaths(), &stats, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatal(err)
 	}
 	if stats.EmptyDirs != 0 {
 		t.Fatalf("queued %d empty dirs with cleanup disabled", stats.EmptyDirs)
+	}
+}
+
+func TestRepeatedScansDoNotQueuePendingPathTwice(t *testing.T) {
+	root := t.TempDir()
+	secondBucket := filepath.Join(root, "cache", "model_digest_r0", "abc", "de_g0")
+	if err := os.MkdirAll(secondBucket, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	coldFile := filepath.Join(secondBucket, "0000000000000000.bin")
+	writeFile(t, coldFile, "cold")
+	oldTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(coldFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		PVCMountPath:            root,
+		CacheDirectory:          "cache",
+		FileQueueMaxSize:        10,
+		FileQueueMinSize:        10,
+		FileAccessTimeThreshold: time.Hour,
+		HexBucketLen:            3,
+	}
+	fileQueue := make(chan string, 2)
+	pendingPaths := pending.NewPaths()
+	stats := Stats{}
+
+	for range 2 {
+		if err := scan(
+			context.Background(),
+			cfg,
+			filepath.Join(root, "cache"),
+			[2]uint64{0, 15},
+			&atomic.Bool{},
+			fileQueue,
+			make(chan string, 1),
+			pendingPaths,
+			&stats,
+			slog.New(slog.DiscardHandler),
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := len(fileQueue); got != 1 {
+		t.Fatalf("queue contains %d paths, want 1", got)
+	}
+	if got := <-fileQueue; got != coldFile {
+		t.Fatalf("queued %q, want %q", got, coldFile)
+	}
+	if stats.Queued != 1 || stats.DuplicatePaths != 1 {
+		t.Fatalf("unexpected stats: %+v", stats)
+	}
+
+	pendingPaths.Remove(coldFile)
+	if err := scan(
+		context.Background(),
+		cfg,
+		filepath.Join(root, "cache"),
+		[2]uint64{0, 15},
+		&atomic.Bool{},
+		fileQueue,
+		make(chan string, 1),
+		pendingPaths,
+		&stats,
+		slog.New(slog.DiscardHandler),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if got := len(fileQueue); got != 1 {
+		t.Fatalf("queue contains %d paths after release, want 1", got)
+	}
+	if stats.Queued != 2 {
+		t.Fatalf("queued %d paths after release, want 2", stats.Queued)
 	}
 }
 

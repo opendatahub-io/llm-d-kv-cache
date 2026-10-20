@@ -62,7 +62,8 @@ func newLogger(cfg *config.Config) (*slog.Logger, func(), error) {
 	closeFn := func() {}
 
 	if cfg.LogFilePath != "" {
-		file, err := os.OpenFile( //nolint:gosec // LOG_FILE_PATH is an explicit operator-provided path.
+		// #nosec G703 -- LOG_FILE_PATH is operator-controlled.
+		file, err := os.OpenFile(
 			cfg.LogFilePath,
 			os.O_CREATE|os.O_WRONLY|os.O_APPEND,
 			0o600,
