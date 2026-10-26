@@ -1,9 +1,1 @@
-# Global reviewers
-* @orozery @liran @nilig @michalmalka @yankay @hyeongyun0916 @sagearc
-
-# Global owners for the entire repo
-* @vMaroon @dannyharnik @kfirtoledo @liu-cong
-
-# Package specific codeowners, including global owners
-/preprocessing @guygir
-/services/uds_tokenizer @delavet @osswangxining
+* @aneeshkp @anishasthana @acardace @dagrayvid @evacchi @Gregory-Pereira @hexfusion @kylape @madhugoutham @nainaz @pazqo @RishabhSaini @tessapham @tsisodia10 @vMaroon @wseaton @zdtsw
