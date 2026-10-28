@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM quay.io/aipcc/base-images/cpu-el9.8:3.6.0-ea.2-1791826724@sha256:501370c1183fc16239e7d157f3c907d8ee9f8683d6e07e422b22c79b9adab01e AS builder
+FROM quay.io/aipcc/base-images/cpu-torch2.13-el9.8:1793124049@sha256:c93317fc1303357f2c8cfcc0e57cbdaa55f7cbbead055542f442b99e42fa4373 AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ USER root
 RUN pip install --no-cache-dir msgpack pyzmq
 
 # Runtime stage
-FROM quay.io/aipcc/base-images/cpu-el9.8:3.6.0-ea.2-1791826724@sha256:501370c1183fc16239e7d157f3c907d8ee9f8683d6e07e422b22c79b9adab01e AS runtime
+FROM quay.io/aipcc/base-images/cpu-torch2.13-el9.8:1793124049@sha256:c93317fc1303357f2c8cfcc0e57cbdaa55f7cbbead055542f442b99e42fa4373 AS runtime
 
 WORKDIR /app
 
