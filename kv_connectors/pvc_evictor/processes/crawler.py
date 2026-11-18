@@ -4,8 +4,9 @@ import contextlib
 import logging
 import multiprocessing
 import os
+import queue
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,11 @@ HEX_MODULO_BASE = 16  # Number of possible hex modulo values (0-15)
 
 # Constants for timing and intervals
 MINUTES_TO_SECONDS = 60.0  # Conversion factor from minutes to seconds
-QUEUE_FULL_SLEEP_SECONDS = 0.1  # Sleep duration when queue is full
+QUEUE_FULL_SLEEP_SECONDS = 0.1  # Poll interval while the queue is at its target size
+QUEUE_PUT_TIMEOUT_SECONDS = 1.0  # Blocking put timeout before re-checking shutdown
 DISCOVERY_LOG_INTERVAL = 10000  # Log every N files discovered
-QUEUE_PUT_TIMEOUT_SECONDS = 0.1  # Timeout for non-blocking queue put
+RESCAN_DELAY_MIN_SECONDS = 1.0  # Delay before the next sweep after one that queued files
+RESCAN_DELAY_MAX_SECONDS = 60.0  # Cap for the backoff after sweeps that queued nothing
 
 
 def safe_scandir(path: str) -> Iterator[os.DirEntry]:
@@ -109,17 +112,6 @@ def _iter_rank_dirs(cache_path: Path) -> Iterator[os.DirEntry]:
                 stack.append(entry.path)
 
 
-def is_dir_empty(dir_path: str) -> bool:
-    """Check if a directory is completely empty."""
-    try:
-        with os.scandir(dir_path) as entries:
-            for _ in entries:
-                return False
-        return True
-    except (OSError, PermissionError):
-        return False
-
-
 def queue_folder(
     folder_path: str,
     folder_queue: Any,
@@ -181,22 +173,12 @@ def stream_cache_files_with_mapper(
     modulo_range_min, modulo_range_max = hex_modulo_range if hex_modulo_range else (0, HEX_MODULO_BASE - 1)
 
     for rank_dir in _iter_rank_dirs(cache_path):
-        # If the rank directory itself is empty, queue it!
-        if is_dir_empty(rank_dir.path):
-            queue_folder(rank_dir.path, folder_queue, on_empty_folder_discovered, dir_cleanup_ttl_seconds)
-            continue
-
         has_hex3_dirs = False
         # Iterate first-level hex buckets (hex_bucket_len hex chars).
         for hex3_dir in safe_scandir(rank_dir.path):
             if not hex3_dir.is_dir() or len(hex3_dir.name) != hex_bucket_len:
                 continue
             has_hex3_dirs = True
-
-            # If the hex3 directory itself is empty, queue it!
-            if is_dir_empty(hex3_dir.path):
-                queue_folder(hex3_dir.path, folder_queue, on_empty_folder_discovered, dir_cleanup_ttl_seconds)
-                continue
 
             # Apply hex modulo filtering for load balancing across crawlers.
             hex_int = hex_to_int(hex3_dir.name)
@@ -227,6 +209,59 @@ def stream_cache_files_with_mapper(
 
         if not has_hex3_dirs:
             queue_folder(rank_dir.path, folder_queue, on_empty_folder_discovered, dir_cleanup_ttl_seconds)
+
+
+def queue_size(file_queue: Any) -> int:
+    """Approximate queue size; 0 where qsize() is unsupported (macOS)."""
+    try:
+        return file_queue.qsize()
+    except Exception:
+        return 0
+
+
+def wait_for_queue_slot(
+    file_queue: Any,
+    deletion_event: Any,
+    shutdown_event: Any,
+    min_queue_size: int,
+    max_queue_size: int,
+    on_wait: Callable[[], None] | None = None,
+) -> bool:
+    """Block until the queue is below its target size for the current deletion state.
+
+    The target is max_queue_size while deletion is ON and min_queue_size
+    (pre-fill) while it is OFF. Returns False if shutdown was requested.
+    """
+    while not shutdown_event.is_set():
+        deleting = deletion_event.is_set()
+        target = max_queue_size if deleting else min_queue_size
+        if queue_size(file_queue) < target:
+            return True
+        if on_wait is not None:
+            on_wait()
+        if deleting:
+            shutdown_event.wait(QUEUE_FULL_SLEEP_SECONDS)
+        else:
+            deletion_event.wait(QUEUE_PUT_TIMEOUT_SECONDS)
+    return False
+
+
+def put_until_accepted(file_queue: Any, item: str, shutdown_event: Any) -> bool:
+    """Put item on the queue, retrying on Full. Returns False if shutdown was requested."""
+    while not shutdown_event.is_set():
+        try:
+            file_queue.put(item, timeout=QUEUE_PUT_TIMEOUT_SECONDS)
+            return True
+        except queue.Full:
+            continue
+    return False
+
+
+def next_rescan_delay(previous_delay: float, queued_this_sweep: int) -> float:
+    """Reset to the minimum after a productive sweep, otherwise double up to the cap."""
+    if queued_this_sweep > 0:
+        return RESCAN_DELAY_MIN_SECONDS
+    return min(previous_delay * 2, RESCAN_DELAY_MAX_SECONDS)
 
 
 def crawler_process(
@@ -284,13 +319,25 @@ def crawler_process(
     stat_error_samples = []  # Store first few stat errors for logging
     max_stat_error_samples = 3
     last_stats_send_time = time.time()
+    rescan_delay = RESCAN_DELAY_MIN_SECONDS
 
-    def get_queue_size() -> int:
-        """Get approximate queue size (non-blocking)."""
-        try:
-            return file_queue.qsize()
-        except Exception:
-            return 0
+    def report_stats() -> None:
+        nonlocal last_stats_send_time
+        last_stats_send_time = send_stats_to_queue(
+            result_queue,
+            "crawler_stats",
+            process_num,
+            {
+                "files_discovered": files_discovered,
+                "files_queued": files_queued,
+                "files_skipped": files_skipped,
+                "files_skipped_stat_error": files_skipped_stat_error,
+                "empty_folders_queued": empty_folders_queued,
+                "queue_size": queue_size(file_queue),
+                "deletion_active": deletion_event.is_set(),
+            },
+            last_stats_send_time,
+        )
 
     def on_empty_folder(*args, **kwargs):
         # Counts empty dirs this crawler discovered and handed to the folder
@@ -311,7 +358,18 @@ def crawler_process(
                 dir_cleanup_ttl_seconds=config_dict.get("dir_cleanup_ttl_seconds", 0.0),
             )
 
+            queued_this_sweep = 0
             for file_path in file_stream:
+                if not wait_for_queue_slot(
+                    file_queue,
+                    deletion_event,
+                    shutdown_event,
+                    min_queue_size,
+                    max_queue_size,
+                    on_wait=report_stats,
+                ):
+                    break
+
                 files_discovered += 1
                 current_time = time.time()
 
@@ -335,79 +393,34 @@ def crawler_process(
                         stat_error_samples.append(f"{file_path}: {type(e).__name__}: {e}")
                     continue
 
-                # Determine target queue size based on deletion state
-                if deletion_event.is_set():
-                    # Deletion is ON: fill up to MAXQ
-                    target_size = max_queue_size
-                    queue_size = get_queue_size()
+                if not put_until_accepted(file_queue, str(file_path), shutdown_event):
+                    break
+                files_queued += 1
+                queued_this_sweep += 1
 
-                    if queue_size >= target_size:
-                        # Queue is full - slow down
-                        time.sleep(QUEUE_FULL_SLEEP_SECONDS)
-                        continue
-                else:
-                    # Deletion is OFF: pre-fill up to MINQ (for fast start when triggered)
-                    target_size = min_queue_size
-                    queue_size = get_queue_size()
+                # Log progress periodically
+                if files_queued % 1000 == 0:
+                    deletion_state = "ON" if deletion_event.is_set() else "OFF"
+                    logger.debug(
+                        f"Queued {files_queued} files "
+                        f"(discovered {files_discovered}, "
+                        f"queue={queue_size(file_queue)}, "
+                        f"deletion={deletion_state})"
+                    )
 
-                    if queue_size >= target_size:
-                        # Queue is pre-filled - just discover, don't queue
-                        if files_discovered % DISCOVERY_LOG_INTERVAL == 0:
-                            logger.debug(
-                                f"Crawler P{process_num} pre-fill complete: "
-                                f"queue={queue_size}/{target_size}, "
-                                f"discovered={files_discovered}"
-                            )
-                        continue
+                # Log every N files discovered (even if not queued)
+                if files_discovered % DISCOVERY_LOG_INTERVAL == 0:
+                    deletion_state = "ON" if deletion_event.is_set() else "OFF"
+                    logger.debug(
+                        f"Discovered {files_discovered} files total "
+                        f"(queued {files_queued}, queue={queue_size(file_queue)}, deletion={deletion_state})"
+                    )
 
-                # Queue the file
-                try:
-                    file_queue.put(str(file_path), timeout=1.0)
-                    files_queued += 1
+                report_stats()
 
-                    # Log progress periodically
-                    if files_queued % 1000 == 0:
-                        queue_size = get_queue_size()
-                        deletion_state = "ON" if deletion_event.is_set() else "OFF"
-                        logger.debug(
-                            f"Queued {files_queued} files "
-                            f"(discovered {files_discovered}, "
-                            f"queue={queue_size}/{target_size}, "
-                            f"deletion={deletion_state})"
-                        )
-
-                    # Log every N files discovered (even if not queued)
-                    if files_discovered % DISCOVERY_LOG_INTERVAL == 0 and files_discovered > 0:
-                        queue_size = get_queue_size()
-                        deletion_state = "ON" if deletion_event.is_set() else "OFF"
-                        logger.debug(
-                            f"Discovered {files_discovered} files total "
-                            f"(queued {files_queued}, queue={queue_size}, deletion={deletion_state})"
-                        )
-                except Exception:
-                    # Queue full or timeout - continue discovering
-                    time.sleep(QUEUE_FULL_SLEEP_SECONDS)
-
-            # If we've scanned everything, wait a bit before rescanning
-            time.sleep(1.0)
-
-            # Send stats to result_queue for aggregated logging
-            queue_size = get_queue_size()
-            last_stats_send_time = send_stats_to_queue(
-                result_queue,
-                "crawler_stats",
-                process_num,
-                {
-                    "files_discovered": files_discovered,
-                    "files_queued": files_queued,
-                    "files_skipped": files_skipped,
-                    "files_skipped_stat_error": files_skipped_stat_error,
-                    "empty_folders_queued": empty_folders_queued,
-                    "queue_size": queue_size,
-                    "deletion_active": deletion_event.is_set(),
-                },
-                last_stats_send_time,
-            )
+            rescan_delay = next_rescan_delay(rescan_delay, queued_this_sweep)
+            shutdown_event.wait(rescan_delay)
+            report_stats()
 
     except Exception as e:
         logger.exception(f"Crawler P{process_num} error: {e}")

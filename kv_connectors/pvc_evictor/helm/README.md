@@ -135,6 +135,7 @@ kubectl get pod <pod-name> -n <namespace> -o jsonpath='{.spec.containers[0].secu
 | `config.fileQueueMaxsize` | Max queue size when deletion is ON | `10000` |
 | `config.fileQueueMinSize` | Pre-fill queue size when deletion is OFF | `1000` |
 | `config.deletionBatchSize` | Files per deletion batch | `100` |
+| `config.deletionMaxFilesPerSecond` | Max files deleted per second (0 = unlimited) | `0` |
 | `config.fileAccessTimeThresholdMinutes` | Skip files accessed within N minutes | `60` |
 | `config.dryRun` | Enable dry-run mode (no actual deletions) | `false` |
 | `config.logLevel` | Log level (DEBUG, INFO, WARNING, ERROR) | `INFO` |
