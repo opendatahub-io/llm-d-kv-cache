@@ -1,6 +1,6 @@
 ARG BASE_IMAGE=gcr.io/distroless/static:nonroot
 
-FROM --platform=${BUILDPLATFORM} golang:1.26.9 AS go-builder
+FROM --platform=${BUILDPLATFORM} golang:1.27.3 AS go-builder
 
 ARG TARGETOS
 ARG TARGETARCH
