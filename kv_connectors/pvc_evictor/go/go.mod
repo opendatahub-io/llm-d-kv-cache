@@ -1,6 +1,6 @@
 module github.com/llm-d/llm-d-kv-cache/kv_connectors/pvc_evictor/go
 
-go 1.26
+go 1.27.3
 
 require (
 	github.com/go-zeromq/zmq4 v0.17.0
