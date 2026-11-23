@@ -1,1 +1,4 @@
 * @aneeshkp @anishasthana @acardace @dagrayvid @evacchi @Gregory-Pereira @hexfusion @kylape @madhugoutham @nainaz @pazqo @RishabhSaini @tessapham @tsisodia10 @vMaroon @wseaton @zdtsw
+
+# Keep ODH owners because this path rule overrides the global rule.
+/kv_connectors/pvc_evictor @aneeshkp @anishasthana @acardace @dagrayvid @evacchi @Gregory-Pereira @hexfusion @kylape @madhugoutham @nainaz @pazqo @RishabhSaini @tessapham @tsisodia10 @vMaroon @wseaton @zdtsw @guygir
