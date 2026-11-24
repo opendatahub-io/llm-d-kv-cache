@@ -13,7 +13,7 @@
 # limitations under the License.
 
 # Build stage
-FROM quay.io/aipcc/base-images/cpu-el9.8:3.6.0-ea.2-1791826724@sha256:501370c1183fc16239e7d157f3c907d8ee9f8683d6e07e422b22c79b9adab01e AS builder
+FROM registry.access.redhat.com/ubi9/python-312:9.8@sha256:f72227ffc4f3faa3772a6ae91ffc03bcf3c507d6b7a525d2bfe90b3579dcb8af AS builder
 
 WORKDIR /app
 
@@ -23,7 +23,7 @@ USER root
 RUN pip install --no-cache-dir msgpack pyzmq
 
 # Runtime stage
-FROM quay.io/aipcc/base-images/cpu-el9.8:3.6.0-ea.2-1791826724@sha256:501370c1183fc16239e7d157f3c907d8ee9f8683d6e07e422b22c79b9adab01e AS runtime
+FROM registry.access.redhat.com/ubi9/python-312:9.8@sha256:f72227ffc4f3faa3772a6ae91ffc03bcf3c507d6b7a525d2bfe90b3579dcb8af AS runtime
 
 WORKDIR /app
 
