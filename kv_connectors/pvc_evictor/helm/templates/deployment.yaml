@@ -65,6 +65,8 @@ spec:
           value: {{ .Values.config.fileQueueMinSize | quote }}
         - name: DELETION_BATCH_SIZE
           value: {{ .Values.config.deletionBatchSize | quote }}
+        - name: DELETION_MAX_FILES_PER_SECOND
+          value: {{ .Values.config.deletionMaxFilesPerSecond | quote }}
         - name: FILE_ACCESS_TIME_THRESHOLD_MINUTES
           value: {{ .Values.config.fileAccessTimeThresholdMinutes | quote }}
 
